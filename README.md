@@ -35,27 +35,45 @@ sqlmove self-test: temporary files only, no network, no credentials
 --------------------------------------------------------------------
 ...
 PASS  a Windows user with no login row is an orphan, whatever a directory lookup would say  <-- pinned defect
+...
 PASS  a same-name login with another SID names both SIDs and is not called a match  <-- pinned defect
+...
 PASS  an orphan's version says to delete it before the user is dropped  <-- pinned defect
 ...
 PASS  the missing-server message names the cause and the fix  <-- pinned defect
+...
 PASS  a loopback name that no longer exists is reported once, as a missing server, not again as a missing database  <-- pinned defect
+...
 PASS  a grant on a versioned table with none on its _evw view is reported  <-- pinned defect
 ...
+PASS  a table DELETE grant, and a view that holds only a column grant or a grant of another class, are reported  <-- pinned defect
+...
 PASS  and checking nothing exits 4, not 0  <-- pinned defect
+...
+PASS  files that exist and hold no rows run no rule: each is listed as skipped and nothing is checked  <-- pinned defect
+...
 PASS  a clean verdict with skipped rules says clean covers only the rules that ran  <-- pinned defect
+...
+PASS  the text NULL, in any case, is an empty permission scope  <-- pinned defect
+...
+PASS  a table grant exported with the text NULL as its column still reaches evw-grant, and no server is called NULL  <-- pinned defect
+...
+PASS  --out naming any file that exists is refused, on a dry run, and the file is untouched  <-- pinned defect
 ...
 PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
 ...
 PASS  a bad export exits 3, names the file and column, and writes nothing  <-- pinned defect
+...
 PASS  a directory with no exports exits 4, not 0  <-- pinned defect
+...
+PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  <-- pinned defect
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-165 assertions, 0 failed
+188 assertions, 0 failed
 ```
 
-The full run prints all 165 assertions. Each `...` line above is where this block is cut.
+The full run prints all 188 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -72,8 +90,8 @@ anything. It adds four things the general tools do not know about:
 - It decides from exported rows, so the answer is a file you can keep and run again.
 - It knows the geodatabase cases: an orphaned `sde` user, versions owned by an orphan and the
   order to clean them up in, and a table grant that its `_evw` view lacks.
-- It reads a skipped check as unchecked. A rule whose file is absent is listed as skipped, and a
-  run that examined no row exits 4, not 0.
+- It reads a skipped check as unchecked. A rule whose file is absent, or whose file holds no row it
+  reads, is listed as skipped, and a run that examined no row exits 4, not 0.
 - It never decides from `SUSER_SID()`. The two catalog views are the only evidence.
 
 A search of GitHub for the name `sqlmove` found two unrelated repositories (`sqlmovers`, with no
@@ -84,11 +102,12 @@ that the searches found nothing.
 ## Requirements
 
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
-driver. The input is CSV, which any SQL Server client can export.
+driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 165 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
-and 3.9.25) and on Ubuntu (Python 3.12.3). `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 835 statements and 206 branches.
+The self-test prints the same 188 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
+returns are removed. `coverage run --branch sqlmove.py --self-test` reports
+100 percent of 913 statements and 220 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -117,8 +136,9 @@ python sqlmove.py EXPORT_DIR --out findings.csv --apply
 Every flag must be spelled in full. The parser sets `allow_abbrev=False`, so `--ap` is refused
 with exit 64 instead of being read as `--apply`, and `--tar` and `--o` are refused too.
 
-`--out` must name a new file. A path that is also one of the input exports is refused with exit
-64, on a dry run too.
+`--out` must name a path that does not exist. A path that is also one of the input exports, and any
+other path that already exists, is refused with exit 64, on a dry run too. The file is created
+exclusively, so a file that appears between the check and the write is not overwritten either.
 
 ### The exports
 
@@ -186,9 +206,18 @@ WHERE p.class IN (0, 1, 3);
 -- columns. Check INFORMATION_SCHEMA.COLUMNS in your release, then export name and owner.
 ```
 
-A database role or schema can have a NULL SID in `sys.database_principals`. An empty SID is
+`sys.database_principals` documents a NULL SID for `SYS` and `INFORMATION_SCHEMA`. An empty SID is
 accepted there and nowhere else, and a user that authenticates through the instance with no SID
 is an orphan.
+
+**NULL.** `sqlcmd` writes a SQL NULL as the text `NULL`. In the columns that can hold a NULL in
+the catalog, the tool reads the text `NULL`, in any case, as an empty cell: the three scope columns
+of `database_permissions`, the four `referenced_*` columns of `dependencies`, `provider`,
+the `owner` of a version and the `sid` of `database_principals`. In every other column the text
+stays, so a login named `NULL` is still a login. Without this, an object-level grant (whose
+`column_name` is NULL) is read as a column grant and skipped, and every reference reads as a
+server called `NULL`. Export without a `#TYPE` line (PowerShell `Export-Csv -NoTypeInformation`)
+and without the dashed line `sqlcmd` prints under a header (`-h -1` with your own header row).
 
 ## What it checks
 
@@ -201,8 +230,8 @@ is an orphan.
 | `login-missing` | both principals | A source login is absent, or has another SID. Instance-owned logins are skipped. | same page |
 | `xdb-server` | `dependencies`, `linked_servers` | A four-part name names a server that is not in `sys.servers`, or a linked server with data access off. WARN for the local server's own name. | [sys.sql_expression_dependencies](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sql-expression-dependencies-transact-sql), [sys.servers](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-servers-transact-sql) |
 | `xdb-database` | `dependencies`, `linked_servers`, `databases` | A cross-database name names a database that is not on the instance. | same pages |
-| `linked-provider` | `linked_servers`, `--target-major` | `SQLNCLI11` on SQL Server 2022 or later. WARN for `SQLOLEDB` and other Native Client versions. | [SQL Server Native Client](https://learn.microsoft.com/en-us/sql/relational-databases/native-client/sql-server-native-client) |
-| `evw-grant` | `objects`, `database_permissions` | A table grants SELECT, INSERT, UPDATE, DELETE or CONTROL to a principal, and its `<table>_evw` view does not, by object, schema or database grant. A DENY is named as a denial. | [Esri: privileges](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/manage-sql-server/privileges-sqlserver.html), [Esri: versioned view](https://desktop.arcgis.com/en/arcmap/latest/manage-data/using-sql-with-gdbs/what-is-a-versioned-view.htm) |
+| `linked-provider` | `linked_servers`, `--target-major` | `SQLNCLI11` on `--target-major` 16 or later. WARN for `SQLOLEDB`, and for other Native Client names on 16 or later. | [SQL Server Native Client](https://learn.microsoft.com/en-us/sql/relational-databases/native-client/sql-server-native-client) |
+| `evw-grant` | `objects`, `database_permissions` | A table grants SELECT, INSERT, UPDATE, DELETE or CONTROL to a principal, and its `<table>_evw` view does not, by object, schema or database grant. A DENY is named as a denial. | [Esri: privileges](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/manage-sql-server/privileges-sqlserver.html), [Esri: what a versioned view is](https://desktop.arcgis.com/en/arcmap/latest/manage-data/using-sql-with-gdbs/what-is-a-versioned-view.htm) |
 
 What the documentation says, and what it does not:
 
@@ -238,16 +267,22 @@ What the documentation says, and what it does not:
   It does not claim that dropping the user first corrupts anything, because the pages do not say
   so.
 - **Jobs and logins.** Jobs and logins live outside the user database, so a restore does not carry
-  them, and the logins a job uses must exist on the destination (Microsoft page above).
-- **Not covered.** There is no rule for database-level settings after a restore. The source
-  notes claimed that a restore wipes them. The pages read for this tool say that TRUSTWORTHY,
-  `DB_CHAINING` and the Service Broker options are OFF after an attach or a restore, and say
-  nothing about the other options, so the tool ships no rule it cannot support.
+  them, and the logins a job uses must exist on the destination (Microsoft page above). The page
+  says a database user becomes an orphan when the database is "restored, attached, or copied".
+- **Not covered.** There is no rule for database-level settings after a restore, so a clean verdict
+  says nothing about database options. The source notes claimed that a restore wipes them. The
+  Microsoft page above says that TRUSTWORTHY is OFF "when a database is attached", that attach and
+  detach disable cross-database ownership chaining, and that the Service Broker options are OFF
+  "when a database is attached from another server". It states none of this for a restore, so the
+  tool ships no rule it cannot support.
 
 ## A real run
 
 `after_move` is a synthetic export of an instance after a move, with one fault planted for each
-rule. Every name, SID and server in it is made up. The run is on Ubuntu with Python 3.12.3.
+rule. Every name, SID and server in it is made up. The run is on Ubuntu with Python 3.12.3. The
+demo directories in this README (`after_move`, `clean`, `empty_dir`, `warn_only`, `header_only`,
+`nulltext`, `refused2` and `utf16`) are not in this repository, which holds four files, so you
+cannot rerun these exact blocks. The self-test builds a similar export in a temporary directory.
 
 ```
 $ python3 sqlmove.py after_move --target-major 16
@@ -279,11 +314,11 @@ FAIL  version-owner  version DEFAULT (owner sde)
 FAIL  version-owner  version wip (owner edit_b)
       the owner is an orphaned user and cannot connect. Only the owner or the geodatabase administrator can delete it, and deleting a version that was not posted loses its edits. Do not drop the user first: reconcile and post or discard the edits, delete the version as the administrator, then drop the user.
 ...
-FAIL  xdb-server  drilldown_proc -> [srv_old].[geodb].[dbo].[parcels]
+FAIL  xdb-server  report_proc -> [srv_old].[geodb].[dbo].[assets]
       server 'srv_old' is not in sys.servers on this instance, so the name cannot resolve. The catalog records such a name without resolving it, so nothing warned at restore time. Use a three-part name, or create the linked server.
 ...
-FAIL  evw-grant  dbo.roads_evw / edit_a
-      UPDATE is granted to edit_a on dbo.roads and not on its versioned view dbo.roads_evw. Esri documents the copy to the view for grants made through ArcGIS; the export shows none here. Re-grant as the dataset owner through ArcGIS.
+FAIL  evw-grant  dbo.sites_evw / edit_a
+      UPDATE is granted to edit_a on dbo.sites and not on its versioned view dbo.sites_evw. Esri documents the copy to the view for grants made through ArcGIS; the export shows none here. Re-grant as the dataset owner through ArcGIS.
 
 VERDICT: 15 FAIL, 0 WARN. The move is not verified. Fix the FAIL lines, export again and run again.
 ```
@@ -291,7 +326,7 @@ VERDICT: 15 FAIL, 0 WARN. The move is not verified. Fix the FAIL lines, export a
 The block is cut at each `...`. The full run lists every finding. `CORP\ann` is a Windows user with
 no login row, so it is an orphan whatever a directory lookup says about the account.
 
-`drilldown_proc` points at `srv_old`, which exists in no row of `sys.servers`. `xdb-database` does
+`report_proc` points at `srv_old`, which exists in no row of `sys.servers`. `xdb-database` does
 not report it a second time as a missing database. The `DEFAULT` version is never told to be
 deleted.
 
@@ -320,6 +355,19 @@ VERDICT: no FAIL in 2 row(s) examined by 1 rule(s), 0 WARN.
 8 rule(s) were skipped and checked nothing. Clean means only the rules that ran.
 $ echo $?
 0
+```
+
+**A rule that examined no row is skipped, not passed.** `header_only/` holds clean principals, an
+`objects.csv` with a header and no rows, and a `database_permissions.csv` with a header and no
+rows. That is what a query run in the wrong database, or with too little permission, returns:
+
+```
+$ python3 sqlmove.py header_only
+...
+  evw-grant        examined no rows
+
+VERDICT: no FAIL in 2 row(s) examined by 1 rule(s), 0 WARN.
+8 rule(s) were skipped and checked nothing. Clean means only the rules that ran.
 ```
 
 **A run that examined nothing exits 4, not 0.** An empty directory, a directory of header-only
@@ -351,6 +399,17 @@ VERDICT: REFUSED. Nothing was checked.
 The line number is the line the record starts on, so a quoted field that holds a line break does
 not move it.
 
+**The text NULL is an empty cell.** `nulltext/` holds a table grant whose `column_name` is the text
+`NULL`, as `sqlcmd` writes it, and a table with a versioned view and no grant on it:
+
+```
+$ python3 sqlmove.py nulltext
+...
+FAIL  evw-grant  dbo.sites_evw / edit_a
+      UPDATE is granted to edit_a on dbo.sites and not on its versioned view dbo.sites_evw. ...
+VERDICT: 1 FAIL, 0 WARN. The move is not verified. Fix the FAIL lines, export again and run again.
+```
+
 **A warning does not fail the gate.** `warn_only/` holds a reference through the local server's own
 name and a `SQLOLEDB` linked server:
 
@@ -374,6 +433,8 @@ $ python3 sqlmove.py after_move --target-major 16 --out findings.csv --apply
 wrote findings.csv
 $ wc -l findings.csv
 16 findings.csv
+$ python3 sqlmove.py after_move --target-major 16 --out findings.csv --apply
+error: --out findings.csv already exists. Name a new file; nothing is overwritten.
 $ python3 sqlmove.py after_move --out after_move/jobs.csv
 error: --out after_move/jobs.csv is also an input export. Name a new file.
 $ python3 sqlmove.py after_move --ap
@@ -390,8 +451,8 @@ The file has a header and one row per finding: `severity`, `rule`, `subject`, `d
 | 1 | At least one rule failed. The move is not verified. |
 | 2 | A file or directory could not be read, or `--out` could not be written. |
 | 3 | An export was refused: a missing column, a SID that is not hex, an empty file or a UTF-16 file. |
-| 4 | Nothing was examined. Every rule was skipped, or every file held no rows. |
-| 64 | Usage error, including an unknown or abbreviated flag, a bad `--target-major`, and an `--out` that is an input. |
+| 4 | Nothing was examined. Every rule was skipped, or every file held no rows. A rule whose files hold no rows is listed as skipped. |
+| 64 | Usage error, including an unknown or abbreviated flag, a bad `--target-major`, and an `--out` that is an input or already exists. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
 Exit 3 and exit 4 are deliberately not exit 0. "I checked and found nothing" and "I could not
@@ -401,11 +462,11 @@ check" are different facts, and a scheduled job must not read one as the other.
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 165 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 188 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 835 statements, 206 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 913 statements, 220 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | 39 hand-picked edits to the decision core and the CLI, each made on a copy, and the self-test failed on all 39. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 165 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 188 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No column the tool does not read reaches stdout or a file | A canary value in an unread column, searched for in the output and in `findings.csv` |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
 | Nothing is written without `--apply` | A dry run, then `--apply`, and a check that the export directory gains no file |
@@ -436,7 +497,7 @@ check" are different facts, and a scheduled job must not read one as the other.
   versioning. A branch-versioned dataset has neither.
 - **It does not know which OLE DB drivers are installed.** A catalog export cannot say. A linked
   server on `MSOLEDBSQL19` is not flagged if that driver is missing on the host.
-- **No settings rule.** See "Not covered" above.
+- **No settings rule.** A clean verdict says nothing about database options. See "Not covered" above.
 - **A hole is not a value.** A version with no owner is not examined. A job with no `owner_sid` is
   an export problem and is refused.
 - **Output files are written in place**, not through a temporary file. A failed write can leave a
@@ -445,7 +506,40 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **`--self-test` ignores every other flag.** It writes only to a temporary directory, which it
   removes at the end, even when an assertion raises.
 - **A field over the CSV module's size limit** exits 2. The limit is the module's own default.
-- **Only UTF-8 CSV.** A byte that is not UTF-8 becomes U+FFFD, and two names can collapse into one.
+- **Only UTF-8 CSV.** A byte that is not UTF-8 becomes U+FFFD. Two different names can then compare
+  equal, and the output shows a garbled name. The self-test pins the replacement at the reader. It
+  does not run a Windows-1252 export through a full verdict.
+
+- **Exit 0 does not mean every rule ran.** On Linux, a file named `Versions.csv` skips
+  `version-owner`, and the exit is still 0 when another rule examined a row. Read the skipped list, or check that it is empty, before you call the move
+  verified. The tool has no flag that turns a skipped rule into a failure.
+- **A truncated final row reads as a row with empty fields.** Short rows are padded with empty
+  strings and are not refused. Check the row count of each export against the instance.
+- **`login-missing` compares SQL logins (`S`), Windows logins (`U`) and Windows groups (`G`).**
+  Microsoft Entra logins (`E`, `X`) and certificate logins are not compared.
+- **`FAIL` on `SQLNCLI11` means the target version does not ship the provider.** It does not mean
+  the link is broken. If you installed the Native Client yourself, treat the finding as stale. The
+  export cannot show installed drivers.
+- **`evw-grant` treats any DENY as final.** It does not model how a narrower GRANT interacts with a
+  wider DENY. Microsoft's permissions pages did not settle this for the author. A schema-wide DENY
+  with a GRANT on the view may be reported as a denial when the grant applies.
+- **CONTROL on a table is expected as CONTROL on the view.** A grant of SELECT, INSERT, UPDATE and
+  DELETE on the view does not satisfy it, and the finding names CONTROL.
+- **A loopback linked server passes `xdb-server`.** The tool does not read a linked server's
+  `data_source`. A server that is in `sys.servers` but points back at the old host is not caught.
+  The tool catches a four-part name whose server is absent, and a name that uses the local server's
+  own name (WARN).
+- **`dependencies.csv` rows are not de-duplicated.** A procedure that refers to one remote entity
+  several times can produce repeated findings and a larger `examined` count.
+- **Do not run the tool on an export you do not trust.** Only whitespace is collapsed, so a control
+  character in a name, such as an ANSI escape sequence, reaches the terminal as received. Pipe the
+  output through `cat -v` if in doubt.
+- **A value in the wrong column can reach the screen.** A cell that fails SID, integer or boolean
+  parsing is quoted back, up to 24 characters, in the REFUSED message. The header names of a refused
+  file are listed too. Keep a secret column out of an export.
+- **Ctrl-C ends the process with the interpreter's own status**, not one of the exit codes above.
+- **The demo fixtures and the mutation harness are not shipped.** The repository holds four files.
+  See "Where each claim was exercised" for what the mutation sweep found.
 
 ## Contributing
 

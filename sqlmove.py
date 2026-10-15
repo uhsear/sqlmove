@@ -79,9 +79,21 @@ FILES = {
 
 SID_COLUMNS = ("sid", "owner_sid")
 
-# A role or a schema in sys.database_principals can have a NULL SID. Every
+# SYS and INFORMATION_SCHEMA in sys.database_principals have a NULL SID. Every
 # other SID column must hold a SID, and an export that does not is refused.
 OPTIONAL_SIDS = (("database_principals", "sid"),)
+
+# Columns that can hold a SQL NULL. sqlcmd and some other clients write a NULL
+# as the text NULL, which would read as a server, a database or a column named
+# NULL. In these columns only, the text NULL in any case is read as empty.
+NULLABLE_COLUMNS = {
+    "database_permissions": ("schema_name", "object_name", "column_name"),
+    "dependencies": ("referenced_server_name", "referenced_database_name",
+                     "referenced_schema_name", "referenced_entity_name"),
+    "linked_servers": ("provider",),
+    "versions": ("owner",),
+    "database_principals": ("sid",),
+}
 INT_COLUMNS = ("server_id",)
 BOOL_COLUMNS = ("is_data_access_enabled",)
 
@@ -443,15 +455,18 @@ def check_evw(data, target_major):
         if base is not None:
             pairs.append((base, obj))
     held = _grants(data["database_permissions"])
+    wanted_on = collections.defaultdict(set)
+    for (grantee, permission, scope), state in held.items():
+        if (scope[0] == "OBJECT" and state == "GRANT"
+                and permission in TABLE_PERMISSIONS):
+            wanted_on[scope[1:]].add((grantee, permission))
     findings = []
     examined = 0
     for table, view in sorted(pairs, key=lambda p: (p[0]["schema_name"],
                                                     p[0]["object_name"])):
         schema = fold(table["schema_name"])
-        wanted = sorted(set(
-            (g, p) for (g, p, scope), state in held.items()
-            if scope == ("OBJECT", schema, fold(table["object_name"]))
-            and state == "GRANT" and p in TABLE_PERMISSIONS))
+        wanted = sorted(wanted_on.get((schema, fold(table["object_name"])),
+                                      ()))
         for grantee, permission in wanted:
             examined += 1
             state = _effective(held, grantee, permission, schema,
@@ -508,6 +523,11 @@ def run_checks(data, target_major=None):
             skipped.append((name, "needs --target-major"))
             continue
         got, examined = check(data, target_major)
+        if examined == 0:
+            # A header-only file is what a query run in the wrong database, or
+            # with too little permission, returns. It checked nothing.
+            skipped.append((name, "examined no rows"))
+            continue
         findings.extend(got)
         ran.append((name, examined,
                     sum(1 for f in got if f.severity == FAIL),
@@ -605,6 +625,9 @@ def load_table(path, stem):
         for column in wanted:
             at = index[column]
             row[column] = raw[at].strip() if at < len(raw) else ""
+            if (column in NULLABLE_COLUMNS.get(stem, ())
+                    and row[column].upper() == "NULL"):
+                row[column] = ""
             try:
                 if column in SID_COLUMNS:
                     if row[column] or (stem, column) not in OPTIONAL_SIDS:
@@ -631,7 +654,9 @@ def read_export(directory):
 
 
 def write_findings(path, report):
-    with open(path, "w", encoding="utf-8", newline="") as handle:
+    # Mode "x" creates the file and fails if it exists, so a path that appeared
+    # after the check in _run is never overwritten.
+    with open(path, "x", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["severity", "rule",
                                                     "subject", "detail"])
         writer.writeheader()
@@ -697,7 +722,7 @@ def _self_test(tmp):
     def ob(schema, name, kind):
         return {"schema_name": schema, "object_name": name, "type": kind}
 
-    def pm(grantee, permission, obj="roads", schema="dbo", state="GRANT",
+    def pm(grantee, permission, obj="sites", schema="dbo", state="GRANT",
            cls="OBJECT_OR_COLUMN", column=""):
         return {"class_desc": cls, "schema_name": schema, "object_name": obj,
                 "column_name": column, "grantee": grantee,
@@ -885,16 +910,20 @@ def _self_test(tmp):
     lg = {"source_server_principals": [
         sp("sa", "01"), sp("appsvc", "a010"), sp("edit_a", "a0aa"),
         sp("NT SERVICE\\MSSQLSERVER", "c010", "U"), sp("##MS_X##", "c011"),
-        sp("app_cert", "c012", "C"), sp("CORP\\grp", "b020", "G")],
+        sp("app_cert", "c012", "C"), sp("CORP\\grp", "b020", "G"),
+        sp("CORP\\winmiss", "b030", "U"),
+        sp("NT AUTHORITY\\SYSTEM", "c020", "U"), sp("entra_user", "c040", "E")],
         "server_principals": logins}
     got, examined = check_logins(lg, None)
     check(names(got) == [("login-missing", FAIL, "appsvc"),
                          ("login-missing", FAIL, "edit_a"),
-                         ("login-missing", FAIL, "CORP\\grp")],
-          "a login missing, or present with another SID, is reported")
-    check(examined == 4,
-          "instance-owned logins and certificate logins are not examined"
-          "  <-- pinned defect")
+                         ("login-missing", FAIL, "CORP\\grp"),
+                         ("login-missing", FAIL, "CORP\\winmiss")],
+          "a login missing, or present with another SID, is reported, and a "
+          "missing Windows login is too  <-- pinned defect")
+    check(examined == 5,
+          "instance-owned logins, certificate logins and Entra logins are "
+          "not examined  <-- pinned defect")
     check("SID (0xa010)" in got[0].detail and "0xa002" in got[1].detail
           and "0xa0aa" in got[1].detail and "orphan" in got[1].detail,
           "a missing login is told its source SID and a changed one names "
@@ -903,7 +932,7 @@ def _self_test(tmp):
     # ---- cross-server and cross-database references
     servers = [sv(0, "srv_new"), sv(1, "link_erp", "SQLNCLI11"),
                sv(2, "link_hr", "MSOLEDBSQL19", False)]
-    deps = [dep("proc1", "srv_old", "geodb", "dbo", "parcels"),
+    deps = [dep("proc1", "srv_old", "geodb", "dbo", "assets"),
             dep("proc2", "link_erp", "erp", "dbo", "t"),
             dep("proc3", "link_hr", "hr", "dbo", "t"),
             dep("proc4", "SRV_NEW", "geodb", "dbo", "t"),
@@ -915,7 +944,7 @@ def _self_test(tmp):
              "databases": [{"name": "master"}, {"name": "geodb"}]}
     got, examined = check_xdb_server(xdata, None)
     check(names(got) == [
-        ("xdb-server", FAIL, "proc1 -> [srv_old].[geodb].[dbo].[parcels]"),
+        ("xdb-server", FAIL, "proc1 -> [srv_old].[geodb].[dbo].[assets]"),
         ("xdb-server", FAIL, "proc3 -> [link_hr].[hr].[dbo].[t]"),
         ("xdb-server", WARN, "proc4 -> [SRV_NEW].[geodb].[dbo].[t]"),
         ("xdb-server", WARN, "proc7 -> [srv_new].[gone].[dbo].[x]")],
@@ -965,42 +994,42 @@ def _self_test(tmp):
           "a catalog with only the local server examines nothing")
 
     # ---- the versioned view that did not get the grant
-    objs = [ob("dbo", "roads", "U"), ob("dbo", "roads_evw", "V"),
-            ob("dbo", "parcels", "U"), ob("dbo", "parcels_evw", "V"),
+    objs = [ob("dbo", "sites", "U"), ob("dbo", "sites_evw", "V"),
+            ob("dbo", "assets", "U"), ob("dbo", "assets_evw", "V"),
             ob("dbo", "plain", "U"), ob("dbo", "orphan_evw", "V"),
-            ob("dbo", "ROADS_ARCHIVE", "U"), ob("dbo", "x_evw", "U")]
+            ob("dbo", "SITES_ARCHIVE", "U"), ob("dbo", "x_evw", "U")]
     perms = [
         pm("edit_a", "SELECT"), pm("edit_a", "INSERT"),
-        pm("edit_a", "UPDATE"), pm("edit_a", "SELECT", "roads_evw"),
-        pm("reader_b", "SELECT"), pm("reader_b", "SELECT", "roads_evw"),
-        pm("edit_c", "SELECT", "parcels"),
+        pm("edit_a", "UPDATE"), pm("edit_a", "SELECT", "sites_evw"),
+        pm("reader_b", "SELECT"), pm("reader_b", "SELECT", "sites_evw"),
+        pm("edit_c", "SELECT", "assets"),
         pm("edit_c", "SELECT", "", "dbo", cls="SCHEMA"),
-        pm("edit_d", "SELECT", "parcels"),
+        pm("edit_d", "SELECT", "assets"),
         pm("edit_d", "SELECT", "", "", cls="DATABASE"),
-        pm("edit_e", "SELECT", "parcels"),
-        pm("edit_e", "SELECT", "parcels_evw", state="DENY"),
-        pm("edit_f", "SELECT"), pm("edit_f", "CONTROL", "roads_evw"),
+        pm("edit_e", "SELECT", "assets"),
+        pm("edit_e", "SELECT", "assets_evw", state="DENY"),
+        pm("edit_f", "SELECT"), pm("edit_f", "CONTROL", "sites_evw"),
         pm("edit_g", "SELECT", column="shape"),
         pm("edit_h", "SELECT", state="DENY"),
-        pm("edit_i", "SELECT", "parcels", state="GRANT_WITH_GRANT_OPTION"),
+        pm("edit_i", "SELECT", "assets", state="GRANT_WITH_GRANT_OPTION"),
         pm("edit_j", "SELECT", "plain"), pm("edit_k", "EXECUTE"),
         pm("edit_l", "SELECT", cls="TYPE"),
         pm("edit_l", "SELECT", state="REVOKE"),
-        pm("EDIT_M", "SELECT", "ROADS", "DBO"),
-        pm("edit_m", "SELECT", "roads_evw"),
-        pm("edit_n", "CONTROL", "parcels"),
-        pm("edit_n", "SELECT", "parcels_evw"),
+        pm("EDIT_M", "SELECT", "SITES", "DBO"),
+        pm("edit_m", "SELECT", "sites_evw"),
+        pm("edit_n", "CONTROL", "assets"),
+        pm("edit_n", "SELECT", "assets_evw"),
         pm("edit_o", "SELECT"),
         pm("edit_o", "SELECT", "", "dbo", state="DENY", cls="SCHEMA")]
     edata = {"objects": objs, "database_permissions": perms}
     got, examined = check_evw(edata, None)
     check(names(got) == [
-        ("evw-grant", FAIL, "dbo.parcels_evw / edit_e"),
-        ("evw-grant", FAIL, "dbo.parcels_evw / edit_i"),
-        ("evw-grant", FAIL, "dbo.parcels_evw / edit_n"),
-        ("evw-grant", FAIL, "dbo.roads_evw / edit_a"),
-        ("evw-grant", FAIL, "dbo.roads_evw / edit_a"),
-        ("evw-grant", FAIL, "dbo.roads_evw / edit_o")],
+        ("evw-grant", FAIL, "dbo.assets_evw / edit_e"),
+        ("evw-grant", FAIL, "dbo.assets_evw / edit_i"),
+        ("evw-grant", FAIL, "dbo.assets_evw / edit_n"),
+        ("evw-grant", FAIL, "dbo.sites_evw / edit_a"),
+        ("evw-grant", FAIL, "dbo.sites_evw / edit_a"),
+        ("evw-grant", FAIL, "dbo.sites_evw / edit_o")],
         "a grant on a versioned table with none on its _evw view is "
         "reported  <-- pinned defect")
     check(examined == 12,
@@ -1012,7 +1041,7 @@ def _self_test(tmp):
     check("denied" in got[0].detail and "on or above" in got[0].detail,
           "a DENY on the view is called a denial, not a missing grant")
     check("through ArcGIS" in got[1].detail
-          and "versioned view dbo.parcels_evw" in got[1].detail,
+          and "versioned view dbo.assets_evw" in got[1].detail,
           "a missing grant points to the ArcGIS route and names the view")
     check("denied" in got[5].detail,
           "a DENY at schema level is a denial too")
@@ -1036,6 +1065,34 @@ def _self_test(tmp):
                     None) == ([], 0),
           "a view whose base table is not in the export is not paired")
 
+    # ---- grants the first pass missed: DELETE alone, a column grant, and a
+    # class the tool does not read must not count as a grant on the view
+    odata = {"objects": [ob("dbo", "sites", "U"), ob("dbo", "sites_evw", "V")],
+             "database_permissions": [
+                 pm("del_a", "DELETE"),
+                 pm("col_b", "SELECT"),
+                 pm("col_b", "SELECT", "sites_evw", column="shape"),
+                 pm("typ_c", "SELECT"),
+                 pm("typ_c", "SELECT", "sites_evw", cls="TYPE")]}
+    got, examined = check_evw(odata, None)
+    check(names(got) == [("evw-grant", FAIL, "dbo.sites_evw / col_b"),
+                         ("evw-grant", FAIL, "dbo.sites_evw / del_a"),
+                         ("evw-grant", FAIL, "dbo.sites_evw / typ_c")]
+          and examined == 3,
+          "a table DELETE grant, and a view that holds only a column grant "
+          "or a grant of another class, are reported  <-- pinned defect")
+    got, examined = check_evw({"objects": odata["objects"],
+                               "database_permissions": [
+                                   pm("ctl", "CONTROL"),
+                                   pm("ctl", "SELECT", "sites_evw"),
+                                   pm("ctl", "INSERT", "sites_evw"),
+                                   pm("ctl", "UPDATE", "sites_evw"),
+                                   pm("ctl", "DELETE", "sites_evw")]}, None)
+    check(names(got) == [("evw-grant", FAIL, "dbo.sites_evw / ctl")]
+          and got[0].detail.startswith("CONTROL"),
+          "CONTROL on the table is expected as CONTROL on the view; four "
+          "data grants do not stand in for it")
+
     # ---- running the rules, and what a skipped rule means
     report = run_checks({})
     check(report.ran == [] and len(report.skipped) == len(RULES)
@@ -1057,10 +1114,62 @@ def _self_test(tmp):
           "and it runs, and fails the gate, with --target-major")
     blank = dict((stem, []) for stem in FILES)
     report = run_checks(blank, 16)
-    check(len(report.ran) == len(RULES) and report.examined == 0
-          and gate(report) == 4,
-          "files that exist and hold no rows run every rule and still check "
-          "nothing  <-- pinned defect")
+    check(report.ran == [] and report.examined == 0 and gate(report) == 4
+          and len(report.skipped) == len(RULES)
+          and set(why for _, why in report.skipped) == {"examined no rows"},
+          "files that exist and hold no rows run no rule: each is listed as "
+          "skipped and nothing is checked  <-- pinned defect")
+    report = run_checks({"server_principals": [sp("sa", "01")],
+                         "database_principals": [dp("dbo", "01")],
+                         "objects": [ob("dbo", "sites", "U"),
+                                     ob("dbo", "sites_evw", "V")],
+                         "database_permissions": []})
+    check([r[0] for r in report.ran] == ["orphan-user"]
+          and dict(report.skipped)["evw-grant"] == "examined no rows",
+          "a rule whose file has a header and no rows is skipped, though the "
+          "other rules ran  <-- pinned defect")
+    lines = describe(report)
+    check(lines[-2].startswith("VERDICT: no FAIL in 1 row(s) examined by 1 "
+                               "rule(s)") and any(
+                                   l.startswith("  evw-grant") and
+                                   "examined no rows" in l for l in lines),
+          "and the verdict counts only the rules that examined a row  "
+          "<-- pinned defect")
+    allclean = {
+        "server_principals": [sp("sa", "01"), sp("edit_a", "a002"),
+                              sp("CORP\\svc", "b001", "U")],
+        "database_principals": [dp("dbo", "01"), dp("edit_a", "a002")],
+        "versions": [ver("q3", "edit_a")],
+        "jobs": [jb("nightly", "b001")],
+        "source_jobs": [jb("nightly", "b001")],
+        "source_server_principals": [sp("sa", "01"), sp("edit_a", "a002"),
+                                    sp("CORP\\svc", "b001", "U")],
+        "linked_servers": [sv(0, "srv_new"), sv(1, "link_erp")],
+        "dependencies": [dep("p", "link_erp", "erp", "dbo", "t"),
+                         dep("p2", "", "geodb", "dbo", "t")],
+        "databases": [{"name": "master"}, {"name": "geodb"}],
+        "objects": [ob("dbo", "sites", "U"), ob("dbo", "sites_evw", "V")],
+        "database_permissions": [pm("edit_a", "SELECT"),
+                                 pm("edit_a", "SELECT", "sites_evw")]}
+    report = run_checks(allclean, 16)
+    check(report.ran == [("orphan-user", 2, 0, 0), ("version-owner", 1, 0, 0),
+                         ("job-owner", 1, 0, 0), ("job-copy", 1, 0, 0),
+                         ("login-missing", 3, 0, 0), ("xdb-server", 1, 0, 0),
+                         ("xdb-database", 1, 0, 0),
+                         ("linked-provider", 1, 0, 0),
+                         ("evw-grant", 1, 0, 0)]
+          and report.skipped == [] and gate(report) == 0,
+          "an instance where every rule examined a row is clean, exit 0")
+    report = run_checks(allclean)
+    check([r[0] for r in report.ran] == [
+        "orphan-user", "version-owner", "job-owner", "job-copy",
+        "login-missing", "xdb-server", "xdb-database", "evw-grant"]
+        and report.skipped == [("linked-provider", "needs --target-major")],
+        "without --target-major only linked-provider is skipped, so the "
+        "other eight rules do not need it  <-- pinned defect")
+    report = run_checks(xdata)
+    check(report.ran == [("xdb-server", 5, 2, 2), ("xdb-database", 4, 2, 0)],
+          "each rule's row reports its examined, FAIL and WARN counts")
     full = dict(inst, jobs=[jb("nightly", "b001")], versions=[],
                 source_jobs=[], source_server_principals=[],
                 dependencies=[], linked_servers=[], databases=[],
@@ -1103,11 +1212,15 @@ def _self_test(tmp):
           "an empty run says NOTHING CHECKED")
     check(not any(l.startswith("rules run") for l in lines),
           "and prints no rules-run heading")
-    lines = describe(run_checks(full, 16))
-    check(lines[-1].startswith("VERDICT: no FAIL in 2 row(s) examined by 9 "
+    lines = describe(run_checks(allclean, 16))
+    check(lines[-1].startswith("VERDICT: no FAIL in 12 row(s) examined by 9 "
                                "rule(s)")
-          and not any("were skipped" in l for l in lines),
+          and not any("were skipped" in l for l in lines)
+          and "rules skipped (each checked nothing):" not in lines,
           "a verdict with no skipped rule prints no skipped note")
+    lines = describe(run_checks(xdata))
+    check("  xdb-server           5 examined    2 FAIL    2 WARN" in lines,
+          "a rule's line prints its counts in fixed columns")
     lines = describe(run_checks(vdata))
     check(any(l.startswith("FAIL  version-owner  version DEFAULT") for l in
               lines) and lines[-1].startswith("VERDICT: 7 FAIL, 0 WARN. The "
@@ -1139,8 +1252,8 @@ def _self_test(tmp):
          ["no_sid_user", "", "INSTANCE"]])
     read_back = read_export(d)["database_principals"]
     check([r["sid"] for r in read_back] == ["", "a1", ""],
-          "a role with a NULL SID reads as an empty SID, not a refusal  "
-          "<-- pinned defect")
+          "a principal with an empty SID reads as an empty SID, not a "
+          "refusal  <-- pinned defect")
     check([u["name"] for u, _ in orphans({
         "server_principals": [sp("a_user", "a1")],
         "database_principals": read_back})] == ["no_sid_user"],
@@ -1172,6 +1285,60 @@ def _self_test(tmp):
     raw_put(d2, "versions", "name,owner\n\n\nv2,o\n")
     check(read_export(d2)["versions"] == [{"name": "v2", "owner": "o"}],
           "blank lines are skipped")
+    # A client such as sqlcmd writes a SQL NULL as the text NULL.
+    d4 = os.path.join(tmp, "nulls")
+    put(d4, "database_permissions",
+        ["class_desc", "schema_name", "object_name", "column_name", "grantee",
+         "permission_name", "state_desc"],
+        [["OBJECT_OR_COLUMN", "dbo", "sites", "NULL", "edit_a", "UPDATE",
+          "GRANT"],
+         ["DATABASE", "NULL", "null", "Null", "edit_b", "SELECT", "GRANT"]])
+    put(d4, "objects", ["schema_name", "object_name", "type"],
+        [["dbo", "sites", "U"], ["dbo", "sites_evw", "V"]])
+    put(d4, "dependencies",
+        ["referencing_name", "referenced_server_name",
+         "referenced_database_name", "referenced_schema_name",
+         "referenced_entity_name"], [["p1", "NULL", "Null", "dbo", "NULL"]])
+    put(d4, "linked_servers",
+        ["server_id", "name", "provider", "is_data_access_enabled"],
+        [["0", "srv_new", "NULL", "0"]])
+    put(d4, "database_principals", ["name", "sid", "authentication_type_desc"],
+        [["SYS", "NULL", "NONE"], ["INFORMATION_SCHEMA", "null", "NONE"]])
+    put(d4, "server_principals", ["name", "sid", "type"],
+        [["NULL", "0x01", "S"]])
+    put(d4, "versions", ["name", "owner"], [["v", "NULL"]])
+    nulls = read_export(d4)
+    check(nulls["database_permissions"][0]["column_name"] == ""
+          and nulls["database_permissions"][1]["schema_name"] == ""
+          and nulls["database_permissions"][1]["object_name"] == ""
+          and nulls["database_permissions"][1]["column_name"] == "",
+          "the text NULL, in any case, is an empty permission scope  "
+          "<-- pinned defect")
+    check(nulls["dependencies"][0]["referenced_server_name"] == ""
+          and nulls["dependencies"][0]["referenced_database_name"] == ""
+          and nulls["dependencies"][0]["referenced_entity_name"] == "",
+          "the text NULL is not a server, a database or an entity name  "
+          "<-- pinned defect")
+    check(nulls["linked_servers"][0]["provider"] == ""
+          and nulls["versions"][0]["owner"] == ""
+          and [r["sid"] for r in nulls["database_principals"]] == ["", ""],
+          "the text NULL is an empty provider, version owner and database "
+          "principal SID  <-- pinned defect")
+    check(nulls["server_principals"][0]["name"] == "NULL",
+          "a column that cannot be NULL keeps the text, so a login called "
+          "NULL stays a login")
+    code, out, err = run_cli([d4])
+    check(code == 1 and "FAIL  evw-grant  dbo.sites_evw / edit_a" in out
+          and "[NULL]" not in out,
+          "a table grant exported with the text NULL as its column still "
+          "reaches evw-grant, and no server is called NULL  "
+          "<-- pinned defect")
+    raw_bytes = os.path.join(tmp, "cp1252")
+    os.makedirs(raw_bytes)
+    with io.open(os.path.join(raw_bytes, "databases.csv"), "wb") as handle:
+        handle.write(b"name\r\ncaf\xe9\r\n")
+    check(read_export(raw_bytes)["databases"] == [{"name": "caf\ufffd"}],
+          "a byte that is not UTF-8 reads as U+FFFD, not a crash")
     d3 = os.path.join(tmp, "bad")
     raw_put(d3, "server_principals",
             'name,sid,type\n"a\nb",0x01,S\n\n"bad\nname",0xZZ,S\n')
@@ -1225,19 +1392,19 @@ def _self_test(tmp):
             ["referencing_name", "referenced_server_name",
              "referenced_database_name", "referenced_schema_name",
              "referenced_entity_name"],
-            [["proc1", "srv_old", "geodb", "dbo", "parcels"],
+            [["proc1", "srv_old", "geodb", "dbo", "assets"],
              ["proc2", "", "otherdb", "dbo", "t"]])
         put(directory, "databases", ["name"], [["master"], ["geodb"]])
         put(directory, "objects", ["schema_name", "object_name", "type"],
-            [["dbo", "roads", "U"], ["dbo", "roads_evw", "V"]])
+            [["dbo", "sites", "U"], ["dbo", "sites_evw", "V"]])
         put(directory, "database_permissions",
             ["class_desc", "schema_name", "object_name", "column_name",
              "grantee", "permission_name", "state_desc"],
-            [["OBJECT_OR_COLUMN", "dbo", "roads", "", "edit_a", "SELECT",
+            [["OBJECT_OR_COLUMN", "dbo", "sites", "", "edit_a", "SELECT",
               "GRANT"],
-             ["OBJECT_OR_COLUMN", "dbo", "roads", "", "edit_a", "UPDATE",
+             ["OBJECT_OR_COLUMN", "dbo", "sites", "", "edit_a", "UPDATE",
               "GRANT"],
-             ["OBJECT_OR_COLUMN", "dbo", "roads_evw", "", "edit_a", "SELECT",
+             ["OBJECT_OR_COLUMN", "dbo", "sites_evw", "", "edit_a", "SELECT",
               "GRANT"]])
         put(directory, "source_server_principals", ["name", "sid", "type"],
             [["sa", "0x01", "S"], ["report_login", "0xA050", "S"]])
@@ -1256,11 +1423,11 @@ def _self_test(tmp):
               "the rule %s ran and printed its row" % rule)
     check("FAIL  orphan-user  sde" in out and "FAIL  orphan-user  edit_b"
           in out, "the orphaned users are listed")
-    check("FAIL  evw-grant  dbo.roads_evw / edit_a" in out
-          and "UPDATE is granted to edit_a on dbo.roads and not on its "
-          "versioned view dbo.roads_evw" in out,
+    check("FAIL  evw-grant  dbo.sites_evw / edit_a" in out
+          and "UPDATE is granted to edit_a on dbo.sites and not on its "
+          "versioned view dbo.sites_evw" in out,
           "the missing view grant is listed with its permission")
-    check("FAIL  xdb-server  proc1 -> [srv_old].[geodb].[dbo].[parcels]"
+    check("FAIL  xdb-server  proc1 -> [srv_old].[geodb].[dbo].[assets]"
           in out, "the loopback name that no longer exists is listed")
     check("FAIL  linked-provider  link_erp" in out,
           "the Native Client provider is listed with --target-major 16")
@@ -1273,6 +1440,8 @@ def _self_test(tmp):
     check(code == 1 and "linked-provider  needs --target-major" in out2
           and "FAIL  linked-provider" not in out2,
           "without --target-major the provider rule is listed as skipped")
+    check("Check only" not in out2 and "wrote" not in out2,
+          "a run with no --out prints no note about a findings file")
 
     # Nothing is written without --apply.
     target = os.path.join(tmp, "findings.csv")
@@ -1311,12 +1480,27 @@ def _self_test(tmp):
     code, out, err = run_cli([demo, "--apply"])
     check(code == 64 and "--apply needs --out" in err and out == "",
           "--apply with nothing to write is a usage error")
+    keep = os.path.join(tmp, "keep.txt")
+    with io.open(keep, "w", encoding="utf-8") as handle:
+        handle.write("precious\n")
+    for extra in ([], ["--apply"]):
+        code, out, err = run_cli([demo, "--out", keep] + extra)
+        with io.open(keep, encoding="utf-8") as handle:
+            kept = handle.read()
+        check(code == 64 and "already exists" in err and out == ""
+              and kept == "precious\n",
+              "--out naming any file that exists is refused%s and the file "
+              "is untouched  <-- pinned defect"
+              % (", with --apply," if extra else ", on a dry run,"))
+    raises(lambda: write_findings(keep, Report([], [], [], [])),
+           "the findings file is created exclusively, so a file that "
+           "appears after the check is never overwritten", FileExistsError)
 
     # Usage errors.
     code, out, err = run_cli([])
     check(code == 64 and "export directory is required" in err and out == "",
           "no directory is a usage error")
-    for bad in ("4", "100", "-1"):
+    for bad in ("4", "8", "100", "-1"):
         code, out, err = run_cli([demo, "--target-major", bad])
         check(code == 64 and out == "",
               "--target-major %s is a usage error" % bad)
@@ -1407,6 +1591,37 @@ def _self_test(tmp):
           in out and "skipped and checked nothing" in out,
           "a clean run exits 0 and still says that skipped rules checked "
           "nothing")
+    for low_high in ("9", "99"):
+        code, out, err = run_cli([clean, "--target-major", low_high])
+        check(code == 0, "--target-major %s, inside the accepted range, "
+              "runs" % low_high)
+
+    # A console that cannot encode a name must not crash the run.
+    cjk = os.path.join(tmp, "cjk")
+    put(cjk, "server_principals", ["name", "sid", "type"],
+        [["sa", "0x01", "S"]])
+    put(cjk, "database_principals", ["name", "sid", "authentication_type_desc"],
+        [["\u7528\u6237", "0xA0FF", "INSTANCE"]])
+    raw_out = io.BytesIO()
+    console = io.TextIOWrapper(raw_out, encoding="cp1252", errors="strict",
+                               newline="")
+    with contextlib.redirect_stdout(console), contextlib.redirect_stderr(
+            io.StringIO()):
+        code = main([cjk])
+    console.flush()
+    check(code == 1 and b"FAIL  orphan-user  ??" in raw_out.getvalue(),
+          "a name the console cannot encode prints as ? and the run exits 1, "
+          "not 70  <-- pinned defect")
+
+    # An upper-case SID in jobs.csv matches a lower-case login SID.
+    up = os.path.join(tmp, "upper")
+    put(up, "server_principals", ["name", "sid", "type"],
+        [["svc", "0xb001", "U"]])
+    put(up, "jobs", ["name", "owner_sid"], [["nightly", "0XB001"]])
+    code, out, err = run_cli([up])
+    check(code == 0 and "\nFAIL  " not in out,
+          "a job owner SID written as 0X in capitals matches the login  "
+          "<-- pinned defect")
 
     # A crash is not a finding.
     real_run = globals()["run_checks"]
@@ -1628,6 +1843,11 @@ def _run(argv):
                 print("error: --out %s is also an input export. Name a new "
                       "file." % args.out, file=sys.stderr)
                 return 64
+        if os.path.lexists(args.out):
+            # A hard link to an export exists too, so it is refused here.
+            print("error: --out %s already exists. Name a new file; nothing "
+                  "is overwritten." % args.out, file=sys.stderr)
+            return 64
 
     try:
         data = read_export(args.export_dir)
