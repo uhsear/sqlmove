@@ -29,8 +29,9 @@ checked nothing. Nothing is written without --apply.
 
 Exit codes: 0 at least one row was examined and no rule failed, 1 at least one
 rule failed, 2 a file could not be read or written, 3 an export was refused
-(a column missing, a SID that is not hex), 4 nothing was examined, 64 usage
-error, 70 an unexpected crash, which is never a finding.
+(a column missing, a SID that is not hex), 4 nothing was examined, 5 no rule
+failed but a rule was skipped (only with --require-all), 64 usage error, 70 an
+unexpected crash, which is never a finding.
 """
 
 from __future__ import print_function
@@ -178,6 +179,21 @@ def _four_part(row):
     return ".".join("[%s]" % p if p else "" for p in parts)
 
 
+def _create_login_advice(name, sid):
+    """How to make a login that a database user or a job can map to.
+
+    CREATE LOGIN takes SID = only for SQL Server logins. A Windows login
+    (DOMAIN\\name) takes its SID from the account, so FROM WINDOWS is the way.
+    Neither export holds the principal type for a database user, so a
+    backslash in the name tells the two apart.
+    """
+    if "\\" in name:
+        return ("Create the login with CREATE LOGIN [%s] FROM WINDOWS (a "
+                "Windows login takes its SID from the account, and the SID "
+                "option is for SQL Server logins only)" % name)
+    return "Create the login with its SID (CREATE LOGIN ... SID = 0x%s)" % sid
+
+
 def orphans(data):
     """Database users whose SID is in no login, as (user, same-name SID).
 
@@ -205,9 +221,9 @@ def check_orphans(data, target_major):
             examined += 1
     for user, same_name in orphans(data):
         if same_name is None:
-            detail = ("no login has this SID or this name. Create the login "
-                      "with the user's SID (CREATE LOGIN ... SID = 0x%s), or "
-                      "confirm the user is stale." % user["sid"])
+            detail = ("no login has this SID or this name. %s, or confirm "
+                      "the user is stale."
+                      % _create_login_advice(user["name"], user["sid"]))
         else:
             detail = ("a login of the same name exists with a different SID "
                       "(0x%s against the user's 0x%s). A name match is not a "
@@ -307,10 +323,14 @@ def check_logins(data, target_major):
             continue
         other = dest_names.get(fold(login["name"]))
         if other is None:
+            if login["type"].strip().upper() == "S":
+                how = ("Create it with its source SID (0x%s)" % login["sid"])
+            else:
+                how = ("Create it with CREATE LOGIN [%s] FROM WINDOWS, which "
+                       "takes the SID from the account" % login["name"])
             detail = ("the login is on the source and not on the "
-                      "destination. Create it with its source SID (0x%s) so "
-                      "the database users that map to it stay mapped."
-                      % login["sid"])
+                      "destination. %s so the database users that map to it "
+                      "stay mapped." % how)
         else:
             detail = ("the login exists with SID 0x%s, not the source SID "
                       "0x%s. A database user mapped to the source SID is an "
@@ -395,7 +415,9 @@ def check_provider(data, target_major):
                       "recommended. Use Microsoft OLE DB Driver (MSOLEDBSQL).")
         elif (provider.startswith("sqlncli") and provider != "sqlncli"
               and target_major >= NO_NATIVE_CLIENT_MAJOR):
-            severity = FAIL if provider == "sqlncli11" else WARN
+            # Microsoft: Native Client, every generation, is not shipped with
+            # SQL Server 2022 and later.
+            severity = FAIL
             detail = ("%s is SQL Server Native Client, which SQL Server "
                       "2022 (major version 16) and later do not ship. The "
                       "target is version %d. Use MSOLEDBSQL."
@@ -535,12 +557,18 @@ def run_checks(data, target_major=None):
     return Report(findings, ran, skipped, sorted(data))
 
 
-def gate(report):
-    """1 when a rule failed, 4 when nothing was examined, else 0."""
+def gate(report, require_all=False):
+    """1 when a rule failed, 4 when nothing was examined, else 0.
+
+    With require_all, a clean run that skipped any rule is 5: the rules that
+    ran found nothing, but some rule checked nothing.
+    """
     if report.fails:
         return 1
     if report.examined == 0:
         return 4
+    if require_all and report.skipped:
+        return 5
     return 0
 
 
@@ -838,6 +866,12 @@ def _self_test(tmp):
     check("SID = 0xa004" in by_subject["edit_b"],
           "an orphan with no same-name login is told the SID to create it "
           "with")
+    check("FROM WINDOWS" in by_subject["CORP\\ann"]
+          and "SID = " not in by_subject["CORP\\ann"]
+          and "for SQL Server logins only" in by_subject["CORP\\ann"],
+          "an orphaned Windows user is told FROM WINDOWS and never a SID = "
+          "option, which CREATE LOGIN allows for SQL logins only  "
+          "<-- pinned defect")
     check("0xa003" in by_subject["reader_b"] and "0xa0a3"
           in by_subject["reader_b"] and "not a SID match"
           in by_subject["reader_b"],
@@ -928,6 +962,10 @@ def _self_test(tmp):
           and "0xa0aa" in got[1].detail and "orphan" in got[1].detail,
           "a missing login is told its source SID and a changed one names "
           "both")
+    check("FROM WINDOWS" in got[2].detail and "FROM WINDOWS" in got[3].detail
+          and "SID (0x" not in got[2].detail + got[3].detail,
+          "a missing Windows login or group is told FROM WINDOWS, not a "
+          "source SID  <-- pinned defect")
 
     # ---- cross-server and cross-database references
     servers = [sv(0, "srv_new"), sv(1, "link_erp", "SQLNCLI11"),
@@ -979,10 +1017,10 @@ def _self_test(tmp):
              sv(6, "f_new", "")]
     got, examined = check_provider({"linked_servers": provs}, 16)
     check(names(got) == [("linked-provider", FAIL, "a_ncli11"),
-                         ("linked-provider", WARN, "b_ncli10"),
+                         ("linked-provider", FAIL, "b_ncli10"),
                          ("linked-provider", WARN, "d_oledb")],
-          "on SQL Server 2022 a Native Client 11 provider fails and its "
-          "relatives warn")
+          "on SQL Server 2022 every Native Client generation fails, and the "
+          "legacy SQLOLEDB warns  <-- pinned defect")
     check(examined == 6, "the local server row is not a linked server")
     check("do not ship" in got[0].detail and "MSOLEDBSQL" in got[0].detail,
           "the provider message says the target does not ship it")
@@ -1064,6 +1102,19 @@ def _self_test(tmp):
                      "database_permissions": [pm("a", "SELECT", "x")]},
                     None) == ([], 0),
           "a view whose base table is not in the export is not paired")
+    # Only a view whose name ends in _evw pairs with a table. Without the
+    # guard the last four characters of any name are cut off, so roads_old
+    # looks like a view of roads, and a table called x_evw like one of x.
+    pdata = {"objects": [ob("dbo", "roads", "U"), ob("dbo", "roads_old", "V"),
+                         ob("dbo", "roads2024", "V"),
+                         ob("dbo", "roads_evw", "V"), ob("dbo", "x", "U"),
+                         ob("dbo", "x_evw", "U")],
+             "database_permissions": [pm("ed", "SELECT", "roads"),
+                                      pm("ed", "SELECT", "roads_evw"),
+                                      pm("ed", "SELECT", "x")]}
+    check(check_evw(pdata, None) == ([], 1),
+          "a view not named <table>_evw, and a table named <table>_evw, are "
+          "never paired with the table  <-- pinned defect")
 
     # ---- grants the first pass missed: DELETE alone, a column grant, and a
     # class the tool does not read must not count as a grant on the view
@@ -1152,6 +1203,8 @@ def _self_test(tmp):
         "database_permissions": [pm("edit_a", "SELECT"),
                                  pm("edit_a", "SELECT", "sites_evw")]}
     report = run_checks(allclean, 16)
+    check(gate(report, True) == 0,
+          "--require-all keeps exit 0 when every rule ran")
     check(report.ran == [("orphan-user", 2, 0, 0), ("version-owner", 1, 0, 0),
                          ("job-owner", 1, 0, 0), ("job-copy", 1, 0, 0),
                          ("login-missing", 3, 0, 0), ("xdb-server", 1, 0, 0),
@@ -1161,6 +1214,9 @@ def _self_test(tmp):
           and report.skipped == [] and gate(report) == 0,
           "an instance where every rule examined a row is clean, exit 0")
     report = run_checks(allclean)
+    check(gate(report) == 0 and gate(report, True) == 5,
+          "a clean run with a skipped rule is exit 0, and exit 5 with "
+          "--require-all")
     check([r[0] for r in report.ran] == [
         "orphan-user", "version-owner", "job-owner", "job-copy",
         "login-missing", "xdb-server", "xdb-database", "evw-grant"]
@@ -1229,6 +1285,9 @@ def _self_test(tmp):
           "move is not verified")
     multi = Report([Finding("r", FAIL, "a\nb", "x\r\n  y")], [("r", 1, 1, 0)],
                    [], [])
+    check("WARN  job-copy  renamed_job" in describe(run_checks(copy))
+          and WARN == "WARN",
+          "a warning prints as WARN, two spaces, its rule and its subject")
     check("FAIL  r  a b" in describe(multi)
           and "      x y" in describe(multi),
           "a value with a line break prints on one line  <-- pinned defect")
@@ -1270,7 +1329,7 @@ def _self_test(tmp):
          "is_data_access_enabled": True},
         {"server_id": 3, "name": "t", "provider": "q",
          "is_data_access_enabled": False}],
-        "headers match ignoring case and spaces, and server_id and the "
+        "headers match ignoring case and surrounding spaces, and server_id and the "
         "boolean are typed")
     d2 = os.path.join(tmp, "bom")
     raw_put(d2, "databases", "\ufeffname\r\nmaster\r\n")
@@ -1333,6 +1392,14 @@ def _self_test(tmp):
           "a table grant exported with the text NULL as its column still "
           "reaches evw-grant, and no server is called NULL  "
           "<-- pinned defect")
+    d5 = os.path.join(tmp, "nullschema")
+    put(d5, "dependencies",
+        ["referencing_name", "referenced_server_name",
+         "referenced_database_name", "referenced_schema_name",
+         "referenced_entity_name"], [["p2", "", "db", "NULL", "t"]])
+    check(_four_part(read_export(d5)["dependencies"][0]) == "[db]..[t]",
+          "the text NULL in referenced_schema_name is an empty schema, not "
+          "a schema called NULL")
     raw_bytes = os.path.join(tmp, "cp1252")
     os.makedirs(raw_bytes)
     with io.open(os.path.join(raw_bytes, "databases.csv"), "wb") as handle:
@@ -1412,6 +1479,16 @@ def _self_test(tmp):
             [["nightly", "0xA002"], ["monthly", "0xA002"]])
 
     write_demo(demo)
+
+    def snapshot(directory):
+        """Every file name in the directory with its exact bytes."""
+        result = {}
+        for name in sorted(os.listdir(directory)):
+            with io.open(os.path.join(directory, name), "rb") as handle:
+                result[name] = handle.read()
+        return result
+
+    demo_before = snapshot(demo)
     code, out, err = run_cli([demo, "--target-major", "16"])
     check(code == 1 and err == "", "the demo export fails the gate with exit 1")
     check(out.startswith("sqlmove: %s\nfiles read: " % demo),
@@ -1462,10 +1539,9 @@ def _self_test(tmp):
         check("canary-hash" not in handle.read(),
               "and no unread column reaches the findings file  "
               "<-- pinned defect")
-    before = os.listdir(demo)
-    check(sorted(before) == sorted(os.listdir(demo)) and not any(
-        n.endswith(".csv") and n not in [s + ".csv" for s in FILES]
-        for n in before), "the export directory gains no file")
+    check(snapshot(demo) == demo_before and len(demo_before) == len(FILES),
+          "after the dry runs and the --apply run the export directory holds "
+          "the same files with the same bytes  <-- pinned defect")
     code, out, err = run_cli([demo, "--out", os.path.join(demo, "jobs.csv")])
     check(code == 64 and "is also an input export" in err and out == "",
           "--out naming an input export is refused, on a dry run too  "
@@ -1512,19 +1588,21 @@ def _self_test(tmp):
 
     # Abbreviations. With them on, --ap parses as --apply and writes.
     for prefix, full in (("--ap", "--apply"), ("--tar", "--target-major"),
-                         ("--o", "--out"), ("--self", "--self-test")):
+                         ("--o", "--out"), ("--self", "--self-test"),
+                         ("--require", "--require-all")):
         arg_err = io.StringIO()
         refused = False
         with contextlib.redirect_stderr(arg_err):
             try:
-                _parse([demo, prefix] + ([] if prefix in ("--ap", "--self")
-                                         else ["16"]))
+                _parse([demo, prefix] + (
+                    [] if prefix in ("--ap", "--self", "--require")
+                    else ["16"]))
             except SystemExit:
                 refused = True
         check(refused and "unrecognized arguments" in arg_err.getvalue(),
               "a prefix of %s is refused, not read as %s%s" % (
-                  full, full, "  <-- pinned defect" if full == "--apply"
-                  else ""))
+                  full, full, "  <-- pinned defect" if full in (
+                      "--apply", "--require-all") else ""))
     code, out, err = run_cli([demo, "--ap", "--out", target])
     check(code == 64 and out == "",
           "main turns a refused prefix into exit 64 and writes nothing")
@@ -1591,6 +1669,17 @@ def _self_test(tmp):
           in out and "skipped and checked nothing" in out,
           "a clean run exits 0 and still says that skipped rules checked "
           "nothing")
+    code, out, err = run_cli([clean, "--require-all"])
+    check(code == 5 and "INCOMPLETE: --require-all is set and 8 rule(s) "
+          "checked nothing" in out and "VERDICT: no FAIL" in out,
+          "--require-all turns a clean run that skipped rules into exit 5  "
+          "<-- pinned defect")
+    code, out, err = run_cli([demo, "--require-all"])
+    check(code == 1 and "INCOMPLETE" not in out,
+          "--require-all never hides a failed rule behind exit 5")
+    code, out, err = run_cli([empty, "--require-all"])
+    check(code == 4 and "INCOMPLETE" not in out,
+          "--require-all keeps exit 4 for a run that examined nothing")
     for low_high in ("9", "99"):
         code, out, err = run_cli([clean, "--target-major", low_high])
         check(code == 0, "--target-major %s, inside the accepted range, "
@@ -1776,6 +1865,8 @@ def _parse(argv):
     ap.add_argument("--out", help="path for the findings CSV")
     ap.add_argument("--apply", action="store_true",
                     help="write --out. Without this nothing is written.")
+    ap.add_argument("--require-all", dest="require_all", action="store_true",
+                    help="exit 5 when no rule failed but a rule was skipped")
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
     return ap.parse_args(argv)
@@ -1877,7 +1968,12 @@ def _run(argv):
             print("\nCheck only. %s was not written. Re-run with --apply."
                   % args.out)
 
-    return gate(report)
+    code = gate(report, args.require_all)
+    if code == 5:
+        print("\nINCOMPLETE: --require-all is set and %d rule(s) checked "
+              "nothing, so this is not a full verdict. Exit 5."
+              % len(report.skipped))
+    return code
 
 
 if __name__ == "__main__":

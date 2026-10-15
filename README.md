@@ -35,6 +35,7 @@ sqlmove self-test: temporary files only, no network, no credentials
 --------------------------------------------------------------------
 ...
 PASS  a Windows user with no login row is an orphan, whatever a directory lookup would say  <-- pinned defect
+PASS  an orphaned Windows user is told FROM WINDOWS and never a SID = option, which CREATE LOGIN allows for SQL logins only  <-- pinned defect
 ...
 PASS  a same-name login with another SID names both SIDs and is not called a match  <-- pinned defect
 ...
@@ -44,7 +45,10 @@ PASS  the missing-server message names the cause and the fix  <-- pinned defect
 ...
 PASS  a loopback name that no longer exists is reported once, as a missing server, not again as a missing database  <-- pinned defect
 ...
+PASS  on SQL Server 2022 every Native Client generation fails, and the legacy SQLOLEDB warns  <-- pinned defect
+...
 PASS  a grant on a versioned table with none on its _evw view is reported  <-- pinned defect
+PASS  a view not named <table>_evw, and a table named <table>_evw, are never paired with the table  <-- pinned defect
 ...
 PASS  a table DELETE grant, and a view that holds only a column grant or a grant of another class, are reported  <-- pinned defect
 ...
@@ -58,6 +62,8 @@ PASS  the text NULL, in any case, is an empty permission scope  <-- pinned defec
 ...
 PASS  a table grant exported with the text NULL as its column still reaches evw-grant, and no server is called NULL  <-- pinned defect
 ...
+PASS  after the dry runs and the --apply run the export directory holds the same files with the same bytes  <-- pinned defect
+...
 PASS  --out naming any file that exists is refused, on a dry run, and the file is untouched  <-- pinned defect
 ...
 PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
@@ -65,27 +71,34 @@ PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
 PASS  a bad export exits 3, names the file and column, and writes nothing  <-- pinned defect
 ...
 PASS  a directory with no exports exits 4, not 0  <-- pinned defect
+PASS  --require-all turns a clean run that skipped rules into exit 5  <-- pinned defect
 ...
 PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  <-- pinned defect
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-188 assertions, 0 failed
+199 assertions, 0 failed
 ```
 
-The full run prints all 188 assertions. Each `...` line above is where this block is cut.
+The full run prints all 199 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
-dbatools does the moving, and does it well. `Copy-DbaLogin` transfers logins "while preserving
+dbatools does the moving, and does it well.
+[`Copy-DbaLogin`](https://dbatools.io/Copy-DbaLogin) transfers logins "while preserving
 authentication details and security context", and copies passwords "with original SIDs to
-prevent orphaned users". `Get-DbaDbOrphanUser` lists orphaned users, `Repair-DbaDbOrphanUser`
-remaps them, and `Test-DbaLinkedServerConnection` tries every linked server
-([dbatools](https://dbatools.io/)). Use them to move and to repair. They connect to live
-instances and they act.
+prevent orphaned users". [`Repair-DbaDbOrphanUser`](https://dbatools.io/Repair-DbaDbOrphanUser)
+remaps orphaned users. Those two change the instance. Three dbatools commands only read:
+[`Get-DbaDbOrphanUser`](https://dbatools.io/Get-DbaDbOrphanUser) ("Get orphaned users"),
+[`Test-DbaAgentJobOwner`](https://dbatools.io/Test-DbaAgentJobOwner) ("Identifies SQL Agent jobs
+with incorrect ownership") and
+[`Test-DbaLinkedServerConnection`](https://dbatools.io/Test-DbaLinkedServerConnection) ("Tests
+connectivity to all linked servers"). All of them connect to a live instance. If you can run
+dbatools against both instances, its read-only commands already cover orphaned users and job
+owners, and the connection test covers a linked server that does not answer.
 
 This tool is the check you run after them, or after a manual restore. It does not move or repair
-anything. It adds four things the general tools do not know about:
+anything. It adds four things the commands above do not do:
 
 - It decides from exported rows, so the answer is a file you can keep and run again.
 - It knows the geodatabase cases: an orphaned `sde` user, versions owned by an orphan and the
@@ -104,10 +117,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 188 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 199 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 913 statements and 220 branches.
+100 percent of 948 statements and 230 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -123,14 +136,16 @@ python sqlmove.py --self-test
 python sqlmove.py EXPORT_DIR
 python sqlmove.py EXPORT_DIR --target-major 16
 python sqlmove.py EXPORT_DIR --out findings.csv --apply
+python sqlmove.py EXPORT_DIR --require-all
 ```
 
 | Flag | Default | What it does |
 |---|---|---|
 | `EXPORT_DIR` | none | A directory of exports. Required unless `--self-test`. |
-| `--target-major` | off | Major version of the destination SQL Server, 16 for SQL Server 2022. The `linked-provider` rule needs it. |
+| `--target-major` | off | Major version of the destination SQL Server, 16 for SQL Server 2022. The `linked-provider` rule needs it. Only 9 to 99 is accepted; any other value exits 64. |
 | `--out` | off | Write every finding to this CSV. Needs `--apply`. |
 | `--apply` | off | Actually write. Without it nothing is written. |
+| `--require-all` | off | Exit 5, not 0, when no rule failed but a rule was skipped. A scheduled job can use it to refuse a partial verdict. |
 | `--self-test` | off | Run the assertions and exit. Other flags are ignored. |
 
 Every flag must be spelled in full. The parser sets `allow_abbrev=False`, so `--ap` is refused
@@ -143,7 +158,7 @@ exclusively, so a file that appears between the check and the write is not overw
 ### The exports
 
 A rule runs when all of its files are in the directory. A column the tool does not read is
-ignored and never printed. Header names match ignoring case and spaces. A SID is hex with or
+ignored and never printed. Header names match ignoring case and surrounding spaces. A SID is hex with or
 without `0x`. The queries below are what the author would run. They were written from the
 documentation and were not run against a live SQL Server for this repository, so check them in
 your version.
@@ -230,7 +245,7 @@ and without the dashed line `sqlcmd` prints under a header (`-h -1` with your ow
 | `login-missing` | both principals | A source login is absent, or has another SID. Instance-owned logins are skipped. | same page |
 | `xdb-server` | `dependencies`, `linked_servers` | A four-part name names a server that is not in `sys.servers`, or a linked server with data access off. WARN for the local server's own name. | [sys.sql_expression_dependencies](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sql-expression-dependencies-transact-sql), [sys.servers](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-servers-transact-sql) |
 | `xdb-database` | `dependencies`, `linked_servers`, `databases` | A cross-database name names a database that is not on the instance. | same pages |
-| `linked-provider` | `linked_servers`, `--target-major` | `SQLNCLI11` on `--target-major` 16 or later. WARN for `SQLOLEDB`, and for other Native Client names on 16 or later. | [SQL Server Native Client](https://learn.microsoft.com/en-us/sql/relational-databases/native-client/sql-server-native-client) |
+| `linked-provider` | `linked_servers`, `--target-major` | `SQLNCLI10` or `SQLNCLI11` on `--target-major` 16 or later. WARN for `SQLOLEDB`. | [SQL Server Native Client](https://learn.microsoft.com/en-us/sql/relational-databases/native-client/sql-server-native-client) |
 | `evw-grant` | `objects`, `database_permissions` | A table grants SELECT, INSERT, UPDATE, DELETE or CONTROL to a principal, and its `<table>_evw` view does not, by object, schema or database grant. A DENY is named as a denial. | [Esri: privileges](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/manage-sql-server/privileges-sqlserver.html), [Esri: what a versioned view is](https://desktop.arcgis.com/en/arcmap/latest/manage-data/using-sql-with-gdbs/what-is-a-versioned-view.htm) |
 
 What the documentation says, and what it does not:
@@ -249,11 +264,12 @@ What the documentation says, and what it does not:
   name, and this tool checks the name against `sys.servers` and `sys.databases`. That the restore
   raised no error and the call failed later is what the author saw. The pages above do not
   describe the error, so the tool does not quote one.
-- **Native Client.** SQL Server Native Client "isn't shipped with" SQL Server 2022 and later, and
-  `SQLNCLI` and `SQLNCLI11` "aren't recommended for new application development". From SQL
-  Server 2019 the provider name `SQLNCLI` maps to the Microsoft OLE DB Driver (`sys.servers`
-  page), so the tool does not flag it. It flags `SQLNCLI11` as FAIL on version 16 or later and
-  treats the other Native Client names as WARN, because the pages do not name them.
+- **Native Client.** The Microsoft page defines Native Client as the ODBC and OLE DB drivers for
+  SQL Server "prior to SQL Server 2022 (16.x)", and says SQL Server Native Client "isn't shipped
+  with" SQL Server 2022 and later. That covers every generation, so `SQLNCLI10` and `SQLNCLI11`
+  are both FAIL on version 16 or later. From SQL Server 2019 the provider name `SQLNCLI` maps to
+  the Microsoft OLE DB Driver (`sys.servers` page), so the tool does not flag it. `SQLOLEDB` is
+  WARN: the legacy provider is not recommended, and the pages do not say it is removed.
 - **Versioned view grants.** Esri says that when you grant SELECT, INSERT, UPDATE and DELETE
   through ArcGIS on a traditionally versioned table, "those privileges are automatically granted
   on the associated versioned view". The page says such grants must be made through ArcGIS by
@@ -267,8 +283,14 @@ What the documentation says, and what it does not:
   It does not claim that dropping the user first corrupts anything, because the pages do not say
   so.
 - **Jobs and logins.** Jobs and logins live outside the user database, so a restore does not carry
-  them, and the logins a job uses must exist on the destination (Microsoft page above). The page
-  says a database user becomes an orphan when the database is "restored, attached, or copied".
+  them, and the logins a job uses must exist on the destination (Microsoft page above). The
+  orphaned-users page says a database user "can become orphaned after a database is restored or
+  attached to a different instance of SQL Server where the login was never created".
+- **Creating the missing login.** The `CREATE LOGIN` page says the `SID` option "applies to SQL
+  Server authentication logins only, not Windows authentication logins"
+  ([CREATE LOGIN](https://learn.microsoft.com/en-us/sql/t-sql/statements/create-login-transact-sql)).
+  The tool therefore gives the `SID =` advice for SQL logins and `CREATE LOGIN ... FROM WINDOWS`
+  for a Windows user (a name with a backslash) and for a source login of type `U` or `G`.
 - **Not covered.** There is no rule for database-level settings after a restore, so a clean verdict
   says nothing about database options. The source notes claimed that a restore wipes them. The
   Microsoft page above says that TRUSTWORTHY is OFF "when a database is attached", that attach and
@@ -303,10 +325,10 @@ FAIL  orphan-user  sde
       a login of the same name exists with a different SID (0xa001 against the user's 0xa0ff). A name match is not a SID match: a person decides whether ALTER USER ... WITH LOGIN is right. In an sde-schema geodatabase this is the geodatabase administrator. Esri lets only a version's owner or the administrator delete a version, so version cleanup has no usable owner until this is fixed.
 
 FAIL  orphan-user  edit_b
-      no login has this SID or this name. Create the login with the user's SID (CREATE LOGIN ... SID = 0xa004), or confirm the user is stale.
+      no login has this SID or this name. Create the login with its SID (CREATE LOGIN ... SID = 0xa004), or confirm the user is stale.
 
 FAIL  orphan-user  CORP\ann
-      no login has this SID or this name. Create the login with the user's SID (CREATE LOGIN ... SID = 0xb002), or confirm the user is stale.
+      no login has this SID or this name. Create the login with CREATE LOGIN [CORP\ann] FROM WINDOWS (a Windows login takes its SID from the account, and the SID option is for SQL Server logins only), or confirm the user is stale.
 
 FAIL  version-owner  version DEFAULT (owner sde)
       the owner is an orphaned user and cannot connect. This is the default version. Fix the owner's login (see orphan-user) and leave the version alone.
@@ -324,7 +346,8 @@ VERDICT: 15 FAIL, 0 WARN. The move is not verified. Fix the FAIL lines, export a
 ```
 
 The block is cut at each `...`. The full run lists every finding. `CORP\ann` is a Windows user with
-no login row, so it is an orphan whatever a directory lookup says about the account.
+no login row, so it is an orphan whatever a directory lookup says about the account. Its advice is
+`FROM WINDOWS`, because `CREATE LOGIN` takes no `SID` for a Windows login.
 
 `report_proc` points at `srv_old`, which exists in no row of `sys.servers`. `xdb-database` does
 not report it a second time as a missing database. The `DEFAULT` version is never told to be
@@ -355,6 +378,20 @@ VERDICT: no FAIL in 2 row(s) examined by 1 rule(s), 0 WARN.
 8 rule(s) were skipped and checked nothing. Clean means only the rules that ran.
 $ echo $?
 0
+```
+
+**A scheduled job can refuse a partial verdict.** `--require-all` returns 5, not 0, when no rule
+failed and a rule was skipped. A failed rule is still 1, and a run that examined nothing is still 4:
+
+```
+$ python3 sqlmove.py clean --require-all
+...
+VERDICT: no FAIL in 2 row(s) examined by 1 rule(s), 0 WARN.
+8 rule(s) were skipped and checked nothing. Clean means only the rules that ran.
+
+INCOMPLETE: --require-all is set and 8 rule(s) checked nothing, so this is not a full verdict. Exit 5.
+$ echo $?
+5
 ```
 
 **A rule that examined no row is skipped, not passed.** `header_only/` holds clean principals, an
@@ -447,29 +484,31 @@ The file has a header and one row per finding: `severity`, `rule`, `subject`, `d
 
 | Code | Meaning |
 |---|---|
-| 0 | At least one row was examined and no rule failed. Warnings do not change it. |
+| 0 | At least one row was examined and no rule failed. Warnings and skipped rules do not change it. |
 | 1 | At least one rule failed. The move is not verified. |
 | 2 | A file or directory could not be read, or `--out` could not be written. |
 | 3 | An export was refused: a missing column, a SID that is not hex, an empty file or a UTF-16 file. |
 | 4 | Nothing was examined. Every rule was skipped, or every file held no rows. A rule whose files hold no rows is listed as skipped. |
+| 5 | Only with `--require-all`: no rule failed, and at least one rule was skipped. |
 | 64 | Usage error, including an unknown or abbreviated flag, a bad `--target-major`, and an `--out` that is an input or already exists. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
-Exit 3 and exit 4 are deliberately not exit 0. "I checked and found nothing" and "I could not
+Exit 0 also covers a run that skipped rules. A scheduled job that needs every rule to run should pass
+`--require-all`, or read the skipped list. Exit 3 and exit 4 are deliberately not exit 0. "I checked and found nothing" and "I could not
 check" are different facts, and a scheduled job must not read one as the other.
 
 ## Where each claim was exercised
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 188 self-test assertions and the `after_move` run above |
-| Exit codes 0, 1, 2, 3, 4, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 913 statements, 220 branches, 0 missed |
-| Mutation: the assertions fail when the code is wrong | 39 hand-picked edits to the decision core and the CLI, each made on a copy, and the self-test failed on all 39. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 188 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Every rule fires and every rule stays quiet on a clean case | 199 self-test assertions and the `after_move` run above |
+| Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
+| 100 percent statement and branch coverage | `coverage run --branch`, 948 statements, 230 branches, 0 missed |
+| Mutation: the assertions fail when the code is wrong | 39 hand-picked edits to the decision core and the CLI, each made on a copy, and the self-test failed on all 39. The harness is not shipped, so a reader cannot rerun that sweep. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
+| Identical on both hosts | The same 199 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No column the tool does not read reaches stdout or a file | A canary value in an unread column, searched for in the output and in `findings.csv` |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
-| Nothing is written without `--apply` | A dry run, then `--apply`, and a check that the export directory gains no file |
+| Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file on a dry run fails it. |
 | Network paths | There are none. The tool imports no module that opens a socket, so there is no stub server to run it against. |
 | Credentials | None are read or needed. No password column is read, and a canary in one is never printed. |
 
@@ -504,20 +543,26 @@ check" are different facts, and a scheduled job must not read one as the other.
   partial file, and the exit code is 2. A finding that starts with `=`, `+`, `-` or `@` is written
   as it came; quote it before opening the file in a spreadsheet.
 - **`--self-test` ignores every other flag.** It writes only to a temporary directory, which it
-  removes at the end, even when an assertion raises.
+  removes at the end, even when an assertion raises. A killed process, or Ctrl-C, can leave an
+  empty `sqlmove-selftest-*` directory in the temp folder.
+- **A failed `--self-test` exits 1**, the same code as "a rule failed". A scheduled job cannot tell
+  a broken tool from a finding by the exit code alone.
 - **A field over the CSV module's size limit** exits 2. The limit is the module's own default.
 - **Only UTF-8 CSV.** A byte that is not UTF-8 becomes U+FFFD. Two different names can then compare
   equal, and the output shows a garbled name. The self-test pins the replacement at the reader. It
   does not run a Windows-1252 export through a full verdict.
 
-- **Exit 0 does not mean every rule ran.** On Linux, a file named `Versions.csv` skips
-  `version-owner`, and the exit is still 0 when another rule examined a row. Read the skipped list, or check that it is empty, before you call the move
-  verified. The tool has no flag that turns a skipped rule into a failure.
+- **Exit 0 does not mean every rule ran.** It means the rules that ran found no FAIL. A run with
+  one file reports 8 of 9 rules skipped and still exits 0. On Linux, a file named `Versions.csv`
+  skips `version-owner` the same way. Pass `--require-all` to get exit 5 for any skipped rule, or
+  parse the skipped list.
+- **A `dependencies.csv` with a header and no rows is skipped**, not clean. A database with no
+  cross-database references shows `xdb-server` and `xdb-database` as skipped.
 - **A truncated final row reads as a row with empty fields.** Short rows are padded with empty
   strings and are not refused. Check the row count of each export against the instance.
 - **`login-missing` compares SQL logins (`S`), Windows logins (`U`) and Windows groups (`G`).**
   Microsoft Entra logins (`E`, `X`) and certificate logins are not compared.
-- **`FAIL` on `SQLNCLI11` means the target version does not ship the provider.** It does not mean
+- **`FAIL` on `SQLNCLI10` or `SQLNCLI11` means the target version does not ship the provider.** It does not mean
   the link is broken. If you installed the Native Client yourself, treat the finding as stale. The
   export cannot show installed drivers.
 - **`evw-grant` treats any DENY as final.** It does not model how a narrower GRANT interacts with a
@@ -528,7 +573,8 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **A loopback linked server passes `xdb-server`.** The tool does not read a linked server's
   `data_source`. A server that is in `sys.servers` but points back at the old host is not caught.
   The tool catches a four-part name whose server is absent, and a name that uses the local server's
-  own name (WARN).
+  own name (WARN). A linked server copied across with its old host still in `data_source` passes
+  and the call reaches the old host. A `dbatools` linked-server copy is the usual way this arises.
 - **`dependencies.csv` rows are not de-duplicated.** A procedure that refers to one remote entity
   several times can produce repeated findings and a larger `examined` count.
 - **Do not run the tool on an export you do not trust.** Only whitespace is collapsed, so a control
@@ -538,6 +584,31 @@ check" are different facts, and a scheduled job must not read one as the other.
   parsing is quoted back, up to 24 characters, in the REFUSED message. The header names of a refused
   file are listed too. Keep a secret column out of an export.
 - **Ctrl-C ends the process with the interpreter's own status**, not one of the exit codes above.
+- **Read the whole export in memory.** Each file is read whole before it is parsed, so a very large
+  export uses memory in proportion to its size. Output is not capped: 200,000 dependency rows
+  print a 57 MB report.
+- **Export as a login that sees every login, job, database and linked server.** Microsoft limits
+  the rows of `sys.server_principals`, `sys.databases`, `sys.servers` and `msdb.dbo.sysjobs` to
+  the objects the caller may see, and `sys.database_principals` needs `ALTER ANY USER` to show other
+  users. A partial export gives FAIL lines for objects that exist: `orphan-user`, `job-owner`,
+  `login-missing`, `xdb-server` and `xdb-database`. It never gives a false clean.
+- **Export with a CSV writer that quotes fields.** A comma inside an unquoted name (`sqlcmd -s,`)
+  shifts the columns. Most files are then refused with exit 3, but a shifted
+  `database_permissions` row can drop out of `evw-grant` silently.
+- **A cell that starts with an unpaired double quote hides the rows after it.** The CSV reader
+  folds the following lines into one cell, those rows are neither read nor reported, and the run
+  can still exit 0. Compare each export's row count with the instance.
+- **A GRANT row and a DENY row for one grantee, permission and object** (from different grantors)
+  give a verdict that depends on row order. `evw-grant` keeps the last row it reads.
+- **A dry run does not check that the parent directory of `--out` exists.** The same command with
+  `--apply` then exits 2 after it prints the report, and a failing rule set is reported as exit 2,
+  not 1.
+- **With stdout closed the report is lost**, while the exit code still follows the verdict.
+- **Symlinked and network-share export directories were not exercised.** Only the real-path check
+  on `--out` is covered.
+- **The first commit in the public history contains the demo names `drilldown_proc` and
+  `parcels`**, which echo the folder name of the script this tool grew from. A later commit renamed
+  them. They identify nothing, but the history is public.
 - **The demo fixtures and the mutation harness are not shipped.** The repository holds four files.
   See "Where each claim was exercised" for what the mutation sweep found.
 
