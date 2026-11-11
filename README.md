@@ -73,16 +73,17 @@ PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
 PASS  a bad export exits 3, names the file and column, and writes nothing  <-- pinned defect
 ...
 PASS  a directory with no exports exits 4, not 0  <-- pinned defect
-PASS  --require-all turns a clean run that skipped rules into exit 5  <-- pinned defect
+PASS  a clean run with a skipped rule is exit 5, and exit 0 only with --allow-skipped  <-- pinned defect
+PASS  a clean run that skipped rules exits 5, not 0, and says so  <-- pinned defect
 ...
 PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  <-- pinned defect
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-222 assertions, 0 failed
+225 assertions, 0 failed
 ```
 
-The full run prints all 222 assertions. Each `...` line above is where this block is cut.
+The full run prints all 225 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -106,7 +107,8 @@ anything. It adds four things the commands above do not do:
 - It knows the geodatabase cases: an orphaned `sde` user, versions owned by an orphan and the
   order to clean them up in, and a table grant that its `_evw` view lacks.
 - It reads a skipped check as unchecked. A rule whose file is absent, or whose file holds no row it
-  reads, is listed as skipped, and a run that examined no row exits 4, not 0.
+  reads, is listed as skipped. A run that examined no row exits 4, and a clean run that skipped a
+  rule exits 5. Neither exits 0 unless you pass `--allow-skipped`.
 - It never decides from `SUSER_SID()`. The two catalog views are the only evidence.
 
 A search of GitHub for the name `sqlmove` found two unrelated repositories (`sqlmovers`, with no
@@ -119,10 +121,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 222 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 225 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 974 statements and 238 branches.
+100 percent of 979 statements and 238 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -138,7 +140,7 @@ python sqlmove.py --self-test
 python sqlmove.py EXPORT_DIR
 python sqlmove.py EXPORT_DIR --target-major 16
 python sqlmove.py EXPORT_DIR --out findings.csv --apply
-python sqlmove.py EXPORT_DIR --require-all
+python sqlmove.py EXPORT_DIR --allow-skipped
 ```
 
 | Flag | Default | What it does |
@@ -147,7 +149,8 @@ python sqlmove.py EXPORT_DIR --require-all
 | `--target-major` | off | Major version of the destination SQL Server, 16 for SQL Server 2022. The `linked-provider` rule needs it. Only 9 to 99 is accepted; any other value exits 64. |
 | `--out` | off | Write every finding to this CSV. Needs `--apply`. |
 | `--apply` | off | Actually write. Without it nothing is written. |
-| `--require-all` | off | Exit 5, not 0, when no rule failed but a rule was skipped. A scheduled job can use it to refuse a partial verdict. |
+| `--allow-skipped` | off | Exit 0, not 5, when no rule failed but a rule was skipped. The skipped rules are still listed. Use it only when a partial run is expected. |
+| `--require-all` | no effect | Exit 5 for a skipped rule is now the default. The flag stays so that a job written for the earlier release still runs. It wins over `--allow-skipped`. |
 | `--self-test` | off | Run the assertions and exit. Other flags are ignored. |
 
 Every flag must be spelled in full. The parser sets `allow_abbrev=False`, so `--ap` is refused
@@ -307,6 +310,8 @@ rule. Every name, SID and server in it is made up. The run is on Ubuntu with Pyt
 demo directories in this README (`after_move`, `clean`, `empty_dir`, `warn_only`, `header_only`,
 `nulltext`, `refused2` and `utf16`) are not in this repository, which holds four files, so you
 cannot rerun these exact blocks. The self-test builds a similar export in a temporary directory.
+The `after_move` run comes from a larger private synthetic export, so its counts are higher than
+the self-test's own demo export. For example, `orphan-user` examined 5 rows and failed 3 there.
 
 ```
 $ python3 sqlmove.py after_move --target-major 16
@@ -378,22 +383,26 @@ rules skipped (each checked nothing):
   ...
 VERDICT: no FAIL in 2 row(s) examined by 1 rule(s), 0 WARN.
 8 rule(s) were skipped and checked nothing. Clean means only the rules that ran.
+
+INCOMPLETE: 8 rule(s) checked nothing, so this is not a full verdict. Exit 5. Pass --allow-skipped to accept a partial run as exit 0.
 $ echo $?
-0
+5
 ```
 
-**A scheduled job can refuse a partial verdict.** `--require-all` returns 5, not 0, when no rule
-failed and a rule was skipped. A failed rule is still 1, and a run that examined nothing is still 4:
+**A scheduled job reads a partial verdict as incomplete, not as clean.** The run returns 5, not 0,
+when no rule failed and a rule was skipped. A failed rule is still 1, and a run that examined
+nothing is still 4. An earlier release returned 0 here unless `--require-all` was set, so a job
+that could check one rule in nine read "could not check" as "clean". `--allow-skipped` restores
+exit 0 for a run that is meant to be partial. It prints the same report without the `INCOMPLETE`
+line:
 
 ```
-$ python3 sqlmove.py clean --require-all
+$ python3 sqlmove.py clean --allow-skipped
 ...
 VERDICT: no FAIL in 2 row(s) examined by 1 rule(s), 0 WARN.
 8 rule(s) were skipped and checked nothing. Clean means only the rules that ran.
-
-INCOMPLETE: --require-all is set and 8 rule(s) checked nothing, so this is not a full verdict. Exit 5.
 $ echo $?
-5
+0
 ```
 
 **A rule that examined no row is skipped, not passed.** `header_only/` holds clean principals, an
@@ -453,7 +462,7 @@ VERDICT: 1 FAIL, 0 WARN. The move is not verified. Fix the FAIL lines, export ag
 name and a `SQLOLEDB` linked server:
 
 ```
-$ python3 sqlmove.py warn_only --target-major 16
+$ python3 sqlmove.py warn_only --target-major 16 --allow-skipped
 ...
 VERDICT: no FAIL in 3 row(s) examined by 3 rule(s), 2 WARN.
 6 rule(s) were skipped and checked nothing. Clean means only the rules that ran.
@@ -503,37 +512,37 @@ FAIL,orphan-user,'=cmd|' /c calc'!A1
 FAIL,orphan-user,'+SUM(1;1)
 FAIL,orphan-user,'-2+3
 FAIL,orphan-user,'@SUM(1)
+...
 ```
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | At least one row was examined and no rule failed. Warnings and skipped rules do not change it. |
+| 0 | At least one row was examined, no rule failed and no rule was skipped. Warnings do not change it. With `--allow-skipped`, skipped rules do not change it either. |
 | 1 | At least one rule failed. The move is not verified. |
 | 2 | A file or directory could not be read, or `--out` could not be written. |
 | 3 | An export was refused: a missing column, a SID that is not hex, an empty file or a UTF-16 file. |
 | 4 | Nothing was examined. Every rule was skipped, or every file held no rows. A rule whose files hold no rows is listed as skipped. |
-| 5 | Only with `--require-all`: no rule failed, and at least one rule was skipped. |
+| 5 | No rule failed, and at least one rule was skipped. `--allow-skipped` turns this into 0. |
 | 64 | Usage error, including an unknown or abbreviated flag, a bad `--target-major`, and an `--out` that is an input or already exists. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
-Exit 0 also covers a run that skipped rules. A scheduled job that needs every rule to run should pass
-`--require-all`, or read the skipped list. Exit 3 and exit 4 are deliberately not exit 0. "I checked and found nothing" and "I could not
+Exit 0 never covers a run that skipped rules, unless you pass `--allow-skipped`. Exit 3, exit 4 and exit 5 are deliberately not exit 0. "I checked and found nothing" and "I could not
 check" are different facts, and a scheduled job must not read one as the other.
 
 ## Where each claim was exercised
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 222 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 225 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 974 statements, 238 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 979 statements, 238 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | 39 hand-picked edits to the decision core and the CLI, each made on a copy, and the self-test failed on all 39. The harness is not shipped, so a reader cannot rerun that sweep. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 222 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 225 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No column the tool does not read reaches stdout or a file | A canary value in an unread column, searched for in the output and in `findings.csv` |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
-| A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Six hand-made edits to the guard (a lead dropped, a field left unguarded, the guard before the line-break collapse) each failed the self-test. The `inject` run above used four of those names. |
+| A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Six hand-made edits to the guard (a lead dropped, a field left unguarded, the guard before the line-break collapse) each failed the self-test. The `inject` run above shows four of its seven rows, cut at the `...`. |
 | Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file on a dry run fails it. |
 | Network paths | There are none. The tool imports no module that opens a socket, so there is no stub server to run it against. |
 | Credentials | None are read or needed. No password column is read, and a canary in one is never printed. |
@@ -581,10 +590,9 @@ check" are different facts, and a scheduled job must not read one as the other.
   equal, and the output shows a garbled name. The self-test pins the replacement at the reader. It
   does not run a Windows-1252 export through a full verdict.
 
-- **Exit 0 does not mean every rule ran.** It means the rules that ran found no FAIL. A run with
-  one file reports 8 of 9 rules skipped and still exits 0. On Linux, a file named `Versions.csv`
-  skips `version-owner` the same way. Pass `--require-all` to get exit 5 for any skipped rule, or
-  parse the skipped list.
+- **Exit 0 with `--allow-skipped` does not mean every rule ran.** It means the rules that ran found
+  no FAIL. A run with one file reports 8 of 9 rules skipped and exits 5 without the flag. On Linux,
+  a file named `Versions.csv` skips `version-owner` the same way.
 - **A `dependencies.csv` with a header and no rows is skipped**, not clean. A database with no
   cross-database references shows `xdb-server` and `xdb-database` as skipped.
 - **A truncated final row reads as a row with empty fields.** Short rows are padded with empty
@@ -640,6 +648,17 @@ check" are different facts, and a scheduled job must not read one as the other.
   them. They identify nothing, but the history is public.
 - **The demo fixtures and the mutation harness are not shipped.** The repository holds four files.
   See "Where each claim was exercised" for what the mutation sweep found.
+- **The mutation results are the author's record** and cannot be reproduced from this repository.
+- **The tab and carriage-return cases of the formula guard are covered by direct calls only.** The
+  reader strips them before a name reaches the writer, so the command line cannot produce them.
+- **The formula guard does not cover invisible leading characters** such as a zero-width space or a
+  byte-order mark. A spreadsheet does not read them as a formula lead, so this is a hardening gap.
+- **The REFUSED text is written to stdout**, so a log that captures stdout keeps the quoted cell.
+- **A failed `--apply` run can leave a partial findings file.** The file is opened so that it is
+  never overwritten, so the next run refuses the same `--out` with exit 64 until you delete the
+  file or name a new one.
+- **A line that holds only whitespace is read as a row**, not skipped, so the run is refused with
+  exit 3. Delete such lines from the export.
 
 ## Contributing
 

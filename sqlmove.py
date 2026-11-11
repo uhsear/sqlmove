@@ -30,7 +30,7 @@ checked nothing. Nothing is written without --apply.
 Exit codes: 0 at least one row was examined and no rule failed, 1 at least one
 rule failed, 2 a file could not be read or written, 3 an export was refused
 (a column missing, a SID that is not hex), 4 nothing was examined, 5 no rule
-failed but a rule was skipped (only with --require-all), 64 usage error, 70 an
+failed but a rule was skipped (0 instead with --allow-skipped), 64 usage error, 70 an
 unexpected crash, which is never a finding.
 """
 
@@ -557,17 +557,18 @@ def run_checks(data, target_major=None):
     return Report(findings, ran, skipped, sorted(data))
 
 
-def gate(report, require_all=False):
+def gate(report, allow_skipped=False):
     """1 when a rule failed, 4 when nothing was examined, else 0.
 
-    With require_all, a clean run that skipped any rule is 5: the rules that
-    ran found nothing, but some rule checked nothing.
+    A clean run that skipped any rule is 5 unless allow_skipped: the rules
+    that ran found nothing, but some rule checked nothing, and a scheduled
+    job must not read that as clean.
     """
     if report.fails:
         return 1
     if report.examined == 0:
         return 4
-    if require_all and report.skipped:
+    if report.skipped and not allow_skipped:
         return 5
     return 0
 
@@ -1219,8 +1220,8 @@ def _self_test(tmp):
         "database_permissions": [pm("edit_a", "SELECT"),
                                  pm("edit_a", "SELECT", "sites_evw")]}
     report = run_checks(allclean, 16)
-    check(gate(report, True) == 0,
-          "--require-all keeps exit 0 when every rule ran")
+    check(gate(report) == 0,
+          "exit 5 does not touch a run where every rule ran")
     check(report.ran == [("orphan-user", 2, 0, 0), ("version-owner", 1, 0, 0),
                          ("job-owner", 1, 0, 0), ("job-copy", 1, 0, 0),
                          ("login-missing", 3, 0, 0), ("xdb-server", 1, 0, 0),
@@ -1230,9 +1231,9 @@ def _self_test(tmp):
           and report.skipped == [] and gate(report) == 0,
           "an instance where every rule examined a row is clean, exit 0")
     report = run_checks(allclean)
-    check(gate(report) == 0 and gate(report, True) == 5,
-          "a clean run with a skipped rule is exit 0, and exit 5 with "
-          "--require-all")
+    check(gate(report) == 5 and gate(report, True) == 0,
+          "a clean run with a skipped rule is exit 5, and exit 0 only with "
+          "--allow-skipped  <-- pinned defect")
     check([r[0] for r in report.ran] == [
         "orphan-user", "version-owner", "job-owner", "job-copy",
         "login-missing", "xdb-server", "xdb-database", "evw-grant"]
@@ -1248,14 +1249,15 @@ def _self_test(tmp):
                 objects=[], database_permissions=[])
     full["database_principals"] = [dp("dbo", "01")]
     report = run_checks(full, 16)
-    check(report.fails == 0 and report.examined == 2 and gate(report) == 0,
-          "a clean instance exits 0")
+    check(report.fails == 0 and report.examined == 2
+          and gate(report, True) == 0,
+          "a clean instance exits 0 once skipped rules are allowed")
     warn_only = run_checks({"jobs": [jb("n", "a002")], "source_jobs":
                             [jb("n", "e001")],
                             "source_server_principals": [sp("old", "e001")],
                             "server_principals": logins + [sp("old", "e001")]})
     check(warn_only.fails == 0 and warn_only.warns == 1
-          and gate(warn_only) == 0,
+          and gate(warn_only, True) == 0,
           "a warning alone never fails the gate")
 
     # ---- the report text
@@ -1664,13 +1666,15 @@ def _self_test(tmp):
     # Abbreviations. With them on, --ap parses as --apply and writes.
     for prefix, full in (("--ap", "--apply"), ("--tar", "--target-major"),
                          ("--o", "--out"), ("--self", "--self-test"),
-                         ("--require", "--require-all")):
+                         ("--require", "--require-all"),
+                         ("--allow", "--allow-skipped")):
         arg_err = io.StringIO()
         refused = False
         with contextlib.redirect_stderr(arg_err):
             try:
                 _parse([demo, prefix] + (
-                    [] if prefix in ("--ap", "--self", "--require")
+                    [] if prefix in ("--ap", "--self", "--require",
+                                     "--allow")
                     else ["16"]))
             except SystemExit:
                 refused = True
@@ -1740,15 +1744,22 @@ def _self_test(tmp):
         ["name", "sid", "authentication_type_desc"],
         [["dbo", "0x01", "INSTANCE"]])
     code, out, err = run_cli([clean])
-    check(code == 0 and "VERDICT: no FAIL in 1 row(s) examined by 1 rule(s)"
-          in out and "skipped and checked nothing" in out,
-          "a clean run exits 0 and still says that skipped rules checked "
-          "nothing")
-    code, out, err = run_cli([clean, "--require-all"])
-    check(code == 5 and "INCOMPLETE: --require-all is set and 8 rule(s) "
-          "checked nothing" in out and "VERDICT: no FAIL" in out,
-          "--require-all turns a clean run that skipped rules into exit 5  "
+    check(code == 5 and "VERDICT: no FAIL in 1 row(s) examined by 1 rule(s)"
+          in out and "skipped and checked nothing" in out
+          and "INCOMPLETE: 8 rule(s) checked nothing" in out,
+          "a clean run that skipped rules exits 5, not 0, and says so  "
           "<-- pinned defect")
+    code, out, err = run_cli([clean, "--allow-skipped"])
+    check(code == 0 and "INCOMPLETE" not in out
+          and "skipped and checked nothing" in out,
+          "--allow-skipped accepts a partial run as exit 0 and still lists "
+          "the skipped rules")
+    code, out, err = run_cli([clean, "--require-all"])
+    check(code == 5 and "INCOMPLETE" in out,
+          "--require-all, now the default, still exits 5")
+    code, out, err = run_cli([clean, "--allow-skipped", "--require-all"])
+    check(code == 5,
+          "--require-all wins over --allow-skipped")
     code, out, err = run_cli([demo, "--require-all"])
     check(code == 1 and "INCOMPLETE" not in out,
           "--require-all never hides a failed rule behind exit 5")
@@ -1757,8 +1768,8 @@ def _self_test(tmp):
           "--require-all keeps exit 4 for a run that examined nothing")
     for low_high in ("9", "99"):
         code, out, err = run_cli([clean, "--target-major", low_high])
-        check(code == 0, "--target-major %s, inside the accepted range, "
-              "runs" % low_high)
+        check(code == 5 and "INCOMPLETE" in out,
+              "--target-major %s, inside the accepted range, runs" % low_high)
 
     # A console that cannot encode a name must not crash the run.
     cjk = os.path.join(tmp, "cjk")
@@ -1782,7 +1793,7 @@ def _self_test(tmp):
     put(up, "server_principals", ["name", "sid", "type"],
         [["svc", "0xb001", "U"]])
     put(up, "jobs", ["name", "owner_sid"], [["nightly", "0XB001"]])
-    code, out, err = run_cli([up])
+    code, out, err = run_cli([up, "--allow-skipped"])
     check(code == 0 and "\nFAIL  " not in out,
           "a job owner SID written as 0X in capitals matches the login  "
           "<-- pinned defect")
@@ -1940,8 +1951,13 @@ def _parse(argv):
     ap.add_argument("--out", help="path for the findings CSV")
     ap.add_argument("--apply", action="store_true",
                     help="write --out. Without this nothing is written.")
+    ap.add_argument("--allow-skipped", dest="allow_skipped",
+                    action="store_true",
+                    help="exit 0, not 5, when no rule failed but a rule was "
+                         "skipped")
     ap.add_argument("--require-all", dest="require_all", action="store_true",
-                    help="exit 5 when no rule failed but a rule was skipped")
+                    help="no effect: exit 5 for a skipped rule is the "
+                         "default. Kept so existing jobs still run.")
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
     return ap.parse_args(argv)
@@ -2043,11 +2059,11 @@ def _run(argv):
             print("\nCheck only. %s was not written. Re-run with --apply."
                   % args.out)
 
-    code = gate(report, args.require_all)
+    code = gate(report, args.allow_skipped and not args.require_all)
     if code == 5:
-        print("\nINCOMPLETE: --require-all is set and %d rule(s) checked "
-              "nothing, so this is not a full verdict. Exit 5."
-              % len(report.skipped))
+        print("\nINCOMPLETE: %d rule(s) checked nothing, so this is not a "
+              "full verdict. Exit 5. Pass --allow-skipped to accept a "
+              "partial run as exit 0." % len(report.skipped))
     return code
 
 
