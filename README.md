@@ -247,7 +247,7 @@ and without the dashed line `sqlcmd` prints under a header (`-h -1` with your ow
 | `version-owner` | the two above, `versions` | A version's owner is an orphan or is not a user. The message gives the order: do not drop the user first. | [Esri: delete a traditional version](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/overview/delete-a-traditional-version.html) |
 | `job-owner` | `server_principals`, `jobs` | The owner SID matches no login. | [Microsoft: metadata on another server](https://learn.microsoft.com/en-us/sql/relational-databases/databases/manage-metadata-when-making-a-database-available-on-another-server) |
 | `job-copy` | `source_jobs`, `jobs`, both principals | A job is on the source and not the destination. WARN when its owner changed. | same page |
-| `login-missing` | both principals | A source login is absent, or has another SID. Instance-owned logins are skipped. | same page |
+| `login-missing` | both principals | A source login is absent, or has another SID. Logins that start with `##`, `NT SERVICE\` or `NT AUTHORITY\` are skipped. | same page |
 | `xdb-server` | `dependencies`, `linked_servers` | A four-part name names a server that is not in `sys.servers`, or a linked server with data access off. WARN for the local server's own name. | [sys.sql_expression_dependencies](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sql-expression-dependencies-transact-sql), [sys.servers](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-servers-transact-sql) |
 | `xdb-database` | `dependencies`, `linked_servers`, `databases` | A cross-database name names a database that is not on the instance. | same pages |
 | `linked-provider` | `linked_servers`, `--target-major` | `SQLNCLI10` or `SQLNCLI11` on `--target-major` 16 or later. WARN for `SQLOLEDB`. | [SQL Server Native Client](https://learn.microsoft.com/en-us/sql/relational-databases/native-client/sql-server-native-client) |
@@ -627,8 +627,12 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **Export as a login that sees every login, job, database and linked server.** Microsoft limits
   the rows of `sys.server_principals`, `sys.databases`, `sys.servers` and `msdb.dbo.sysjobs` to
   the objects the caller may see, and `sys.database_principals` needs `ALTER ANY USER` to show other
-  users. A partial export gives FAIL lines for objects that exist: `orphan-user`, `job-owner`,
-  `login-missing`, `xdb-server` and `xdb-database`. It never gives a false clean.
+  users. A partial export of those four views gives FAIL lines for objects that exist:
+  `orphan-user`, `job-owner`, `login-missing`, `xdb-server` and `xdb-database`. A partial
+  export of `dependencies`, `objects` or `database_permissions` gives no such sign. A row that
+  the exporting login cannot see is simply absent, and the tool cannot detect an absent row. A
+  hidden cross-server reference or a hidden `_evw` grant gives no FAIL, and the run can exit 5, or
+  0 with `--allow-skipped`. Compare each export's row count with the instance.
 - **Export with a CSV writer that quotes fields.** A comma inside an unquoted name (`sqlcmd -s,`)
   shifts the columns. Most files are then refused with exit 3, but a shifted
   `database_permissions` row can drop out of `evw-grant` silently.
@@ -657,6 +661,37 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **A failed `--apply` run can leave a partial findings file.** The file is opened so that it is
   never overwritten, so the next run refuses the same `--out` with exit 64 until you delete the
   file or name a new one.
+- **The tool cannot tell a partial catalog from a full one.** Without `VIEW ANY DEFINITION` a
+  login sees only its own entries in `sys.server_principals`, and without the right Agent role it
+  cannot read the `msdb.dbo.sysjobs` rows it does not own. A short export can pass `login-missing`
+  and `job-copy` while `orphan-user` and `job-owner` over-report. Run the queries as a `sysadmin`.
+- **The statement that `sqlcmd` prints a NULL as the text `NULL` comes from observation**, not
+  from Microsoft's `sqlcmd` utility page.
+- **The dashed header line and `-h -1` are behaviours seen in practice.** They are not cited to
+  Microsoft.
+- **A file with no header row is refused, and its first data row is printed as if it were the
+  header.** Do not export a secret into the first row of a headerless file.
+- **A directory named like an export**, for example `server_principals.csv/`, is skipped as if the
+  file were absent. The run reports the rule as skipped (exit 4 or 5) and never says that the path
+  is a directory.
+- **A dry run with `--out` in a directory that does not exist** reports "Check only" and exits 0
+  or 1. The missing directory shows only as exit 2 on the later `--apply` run.
+- **Spaces around a value are stripped.** A SQL name with trailing spaces compares as the same name
+  without them, so two names that differ only in edge spaces compare equal.
+- **`findings.csv` is written as UTF-8 without a byte-order mark.** Excel can show non-ASCII names
+  garbled. Import the file as UTF-8.
+- **An ANSI export (Windows-1252 or OEM) with accented names** compares consistently across files,
+  because every file gets the same replacement. The names in the output show the replacement
+  character.
+- **Legacy machine-local Windows groups on the source** (for example
+  `HOST\SQLServerMSSQLUser$HOST$INSTANCE`, from SQL Server 2005 era installs) are not in the
+  skipped prefixes, so `login-missing` reports them as FAIL although the instance owns them.
+- **The `server_principals` query has no type filter.** If a principal has a NULL `sid`, `sqlcmd`
+  writes the text `NULL`, and the strict SID parser refuses the whole export with exit 3. The
+  author could not confirm from the `sys.server_principals` page whether any fixed server role has
+  a NULL `sid`. Run the query on your instance before you rely on it.
+- **The Python `csv` module, `os.path.lexists` and Windows file-sharing behaviour** that the code
+  relies on are not cited to their documentation here.
 - **A line that holds only whitespace is read as a row**, not skipped, so the run is refused with
   exit 3. Delete such lines from the export.
 

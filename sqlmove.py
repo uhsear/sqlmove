@@ -1956,8 +1956,9 @@ def _parse(argv):
                     help="exit 0, not 5, when no rule failed but a rule was "
                          "skipped")
     ap.add_argument("--require-all", dest="require_all", action="store_true",
-                    help="no effect: exit 5 for a skipped rule is the "
-                         "default. Kept so existing jobs still run.")
+                    help="exit 5 for a skipped rule is now the default, so "
+                         "this adds nothing alone. It wins over "
+                         "--allow-skipped. Kept so existing jobs still run.")
     ap.add_argument("--self-test", dest="self_test", action="store_true",
                     help="run the offline assertions and exit")
     return ap.parse_args(argv)
