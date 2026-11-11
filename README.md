@@ -591,7 +591,7 @@ check" are different facts, and a scheduled job must not read one as the other.
   does not run a Windows-1252 export through a full verdict.
 
 - **Exit 0 with `--allow-skipped` does not mean every rule ran.** It means the rules that ran found
-  no FAIL. A run with one file reports 8 of 9 rules skipped and exits 5 without the flag. On Linux,
+  no FAIL. A run with two files, `server_principals.csv` and `database_principals.csv`, reports 8 of 9 rules skipped and exits 5 without the flag. A run with one file skips all 9 rules, examines nothing and exits 4. On Linux,
   a file named `Versions.csv` skips `version-owner` the same way.
 - **A `dependencies.csv` with a header and no rows is skipped**, not clean. A database with no
   cross-database references shows `xdb-server` and `xdb-database` as skipped.
@@ -638,7 +638,7 @@ check" are different facts, and a scheduled job must not read one as the other.
   `database_permissions` row can drop out of `evw-grant` silently.
 - **A cell that starts with an unpaired double quote hides the rows after it.** The CSV reader
   folds the following lines into one cell, those rows are neither read nor reported, and the run
-  can still exit 0. Compare each export's row count with the instance.
+  can still exit 0 when other rows are read. A file with only that row exits 4. Compare each export's row count with the instance.
 - **A GRANT row and a DENY row for one grantee, permission and object** (from different grantors)
   give a verdict that depends on row order. `evw-grant` keeps the last row it reads.
 - **A dry run does not check that the parent directory of `--out` exists.** The same command with
@@ -657,6 +657,23 @@ check" are different facts, and a scheduled job must not read one as the other.
   reader strips them before a name reaches the writer, so the command line cannot produce them.
 - **The formula guard does not cover invisible leading characters** such as a zero-width space or a
   byte-order mark. A spreadsheet does not read them as a formula lead, so this is a hardening gap.
+- **The README "A real run" blocks use fixtures that are not shipped** (after_move, clean,
+  empty_dir, warn_only, header_only, nulltext, refused2, utf16, inject), so a reader cannot rerun
+  them. The author rebuilt the clean and inject cases by hand and the output matched.
+- **A cell that starts with an invisible character**, such as a zero-width space, is not prefixed,
+  so a spreadsheet may still read it as text, not a formula.
+- **The findings file ends each line with CRLF**, as the `csv` module writes it by default.
+- **An export with a NULL server principal SID is refused with exit 3.** No documented NULL-SID
+  case for fixed server roles was confirmed.
+- **Contained Windows database users**, which report authentication `WINDOWS`, are not checked
+  for a login.
+- **A reader that closes the pipe early**, for example `| head`, makes the run exit 70. With
+  `--apply` the findings file is then not written, because the report is printed first. Redirect
+  the report to a file instead.
+- **Bracketed names in the advice text are not escaped.** A name that contains a closing bracket
+  must be doubled by hand before the `CREATE LOGIN` line is run.
+- **An empty `server_principals.csv` makes every instance-authenticated database user report as an
+  orphan.** Check that the file holds at least the `sa` row before you trust the verdict.
 - **The REFUSED text is written to stdout**, so a log that captures stdout keeps the quoted cell.
 - **A failed `--apply` run can leave a partial findings file.** The file is opened so that it is
   never overwritten, so the next run refuses the same `--out` with exit 64 until you delete the
@@ -692,8 +709,10 @@ check" are different facts, and a scheduled job must not read one as the other.
   a NULL `sid`. Run the query on your instance before you rely on it.
 - **The Python `csv` module, `os.path.lexists` and Windows file-sharing behaviour** that the code
   relies on are not cited to their documentation here.
-- **A line that holds only whitespace is read as a row**, not skipped, so the run is refused with
-  exit 3. Delete such lines from the export.
+- **A line that holds only whitespace is read as a row**, not skipped. Where the file has a
+  required SID, integer or boolean column, the run is refused with exit 3. In
+  `database_principals.csv` the `sid` column is optional, so the line is read as a user with an
+  empty name and no refusal or warning is given. Delete such lines from the export.
 
 ## Contributing
 
