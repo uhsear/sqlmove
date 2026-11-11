@@ -162,6 +162,13 @@ def parse_sid(text):
     return match.group(1).lower()
 
 
+def parse_int(text):
+    try:
+        return int(text)
+    except ValueError:
+        raise ValueError("%r is not an integer" % text.strip()[:24])
+
+
 def parse_bool(text):
     value = text.strip().casefold()
     if value in ("1", "true"):
@@ -678,7 +685,7 @@ def load_table(path, stem):
                     if row[column] or (stem, column) not in OPTIONAL_SIDS:
                         row[column] = parse_sid(row[column])
                 elif column in INT_COLUMNS:
-                    row[column] = int(row[column])
+                    row[column] = parse_int(row[column])
                 elif column in BOOL_COLUMNS:
                     row[column] = parse_bool(row[column])
             except ValueError as exc:
@@ -1325,6 +1332,9 @@ def _self_test(tmp):
           and cell("") == "" and cell("'=x") == "'=x",
           "a cell that does not start with a formula character, an empty "
           "cell and a cell already led by an apostrophe pass unchanged")
+    check(cell("=") == "'=" and cell("@") == "'@",
+          "a cell that is only a formula character gets one apostrophe  "
+          "<-- pinned defect")
     for field, other in (("subject", "detail"), ("detail", "subject")):
         for lead, label in (("=", "equals"), ("+", "plus"), ("-", "minus"),
                             ("@", "at"), (chr(9) + "=", "tab then equals"),
@@ -1463,6 +1473,17 @@ def _self_test(tmp):
     raises(lambda: read_export(os.path.join(tmp, "bad")),
            "a non-numeric server_id refuses the export", InputError,
            "column server_id")
+    raw_put(d3, "linked_servers",
+            "server_id,name,provider,is_data_access_enabled\n%s,s,p,1\n"
+            % ("9" * 400 + "x"))
+    quoted = "no error raised"
+    try:
+        read_export(d3)
+    except InputError as exc:
+        quoted = str(exc)
+    check("column server_id" in quoted and "9" * 25 not in quoted,
+          "a wrong-column integer is quoted back up to 24 characters, like "
+          "a SID or boolean  <-- pinned defect")
     os.remove(os.path.join(d3, "server_principals.csv"))
     raw_put(d3, "linked_servers",
             "server_id,name,provider,is_data_access_enabled\n1,s,p,maybe\n")

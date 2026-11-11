@@ -72,6 +72,8 @@ PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
 ...
 PASS  a bad export exits 3, names the file and column, and writes nothing  <-- pinned defect
 ...
+PASS  a wrong-column integer is quoted back up to 24 characters, like a SID or boolean  <-- pinned defect
+...
 PASS  a directory with no exports exits 4, not 0  <-- pinned defect
 PASS  a clean run with a skipped rule is exit 5, and exit 0 only with --allow-skipped  <-- pinned defect
 PASS  a clean run that skipped rules exits 5, not 0, and says so  <-- pinned defect
@@ -80,10 +82,10 @@ PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-225 assertions, 0 failed
+227 assertions, 0 failed
 ```
 
-The full run prints all 225 assertions. Each `...` line above is where this block is cut.
+The full run prints all 227 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -108,8 +110,8 @@ anything. It adds four things the commands above do not do:
 - It knows the geodatabase cases: an orphaned `sde` user, versions owned by an orphan and the
   order to clean them up in, and a table grant that its `_evw` view lacks.
 - It reads a skipped check as unchecked. A rule whose file is absent, or whose file holds no row it
-  reads, is listed as skipped. A run that examined no row exits 4, and a clean run that skipped a
-  rule exits 5. Neither exits 0 unless you pass `--allow-skipped`.
+  reads, is listed as skipped. A run that examined no row exits 4, with or without
+  `--allow-skipped`. A clean run that skipped a rule exits 5, and exits 0 only with that flag.
 - It never decides from `SUSER_SID()`. The two catalog views are the only evidence.
 
 A search of GitHub for the name `sqlmove` found two unrelated repositories (`sqlmovers`, with no
@@ -122,10 +124,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 225 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 227 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 979 statements and 238 branches.
+100 percent of 992 statements and 238 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -538,9 +540,9 @@ check" are different facts, and a scheduled job must not read one as the other.
 |---|---|
 | Every rule fires and every rule stays quiet on a clean case | 225 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 979 statements, 238 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 992 statements, 238 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | The author made hand-picked edits to the decision core and the CLI on copies, and the self-test failed on every one that changed behaviour. The harness is not shipped, so a reader cannot rerun that sweep and the count is not claimed. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 225 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 227 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No cell value from a column the tool does not read reaches stdout or a file; a refused file's header names are listed | A canary value in an unread column, searched for in the output and in `findings.csv` |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
 | A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Thirteen hand-made edits to the guard (each lead dropped, each field left unguarded, the guard before the line-break collapse, the apostrophe doubled or dropped) were rerun by a reviewer: twelve failed the self-test and one was an equivalent mutant. The `inject` run above shows four of its seven rows, cut at the `...`. |
@@ -581,6 +583,15 @@ check" are different facts, and a scheduled job must not read one as the other.
   full-width variants of `=` and `+`. A line feed cannot lead a cell here, because line breaks are
   collapsed first. A full-width lead is written as it came. The apostrophe is shown by a spreadsheet
   only as text, so a program that reads the findings file back must strip one leading apostrophe.
+  It cannot tell an added apostrophe from one that was in the name: a user named `'=lit` and a
+  user named `=lit` both come out as `'=lit`. The guard also skips a lead of U+FEFF or U+200B,
+  which a spreadsheet does not read as a formula lead.
+- **Tab and carriage-return leads are pinned by `cell()` and `findings_rows()` calls**, not by an
+  end-to-end run, because the reader strips them first. The tab-then-equals case is covered end to
+  end: it comes out as `'=tab`.
+- **The mutation count in the "Exercised by" table is a reviewer's record.** The harness is not
+  shipped, so the thirteen-edit count (twelve killed, one equivalent) cannot be rerun from this
+  repository.
 - **`--self-test` ignores every other flag.** It writes only to a temporary directory, which it
   removes at the end, even when an assertion raises. A killed process, or Ctrl-C, can leave an
   empty `sqlmove-selftest-*` directory in the temp folder.
@@ -619,7 +630,9 @@ check" are different facts, and a scheduled job must not read one as the other.
   character in a name, such as an ANSI escape sequence, reaches the terminal as received. Pipe the
   output through `cat -v` if in doubt.
 - **A value in the wrong column can reach the screen.** A cell that fails SID, integer or boolean
-  parsing is quoted back, up to 24 characters, in the REFUSED message. The header names of a refused
+  parsing is quoted back, up to 24 characters, in the REFUSED message. An integer cell is read with
+  Python's `int()`, so `server_id` also accepts underscores and non-ASCII digits, such as `1_0`.
+  A real export never holds these. The header names of a refused
   file are listed too. Keep a secret column out of an export.
 - **Ctrl-C ends the process with the interpreter's own status**, not one of the exit codes above.
 - **Read the whole export in memory.** Each file is read whole before it is parsed, so a very large
@@ -662,7 +675,9 @@ check" are different facts, and a scheduled job must not read one as the other.
   case for fixed server roles was confirmed.
 - **Contained Windows database users**, which report authentication `WINDOWS`, are not checked
   for a login.
-- **A reader that closes the pipe early**, for example `| head`, makes the run exit 70. With
+- **A reader that closes the pipe early**, for example `| head`, makes the run exit 70. Checked on Windows
+  and on Ubuntu with a 20,000-row export piped to `head -c 10`. If stderr goes into the same pipe,
+  Python can exit 120 on Linux instead. With
   `--apply` the findings file is then not written, because the report is printed first. Redirect
   the report to a file instead.
 - **Bracketed names in the advice text are not escaped.** A name that contains a closing bracket
@@ -695,6 +710,8 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **An ANSI export (Windows-1252 or OEM) with accented names** compares consistently across files,
   because every file gets the same replacement. The names in the output show the replacement
   character.
+- **A `BUILTIN\` login on the source** (for example `BUILTIN\Administrators`) is not in the
+  skipped prefixes, so `login-missing` reports it as FAIL when the destination does not hold it.
 - **Legacy machine-local Windows groups on the source** (for example
   `HOST\SQLServerMSSQLUser$HOST$INSTANCE`, from SQL Server 2005 era installs) are not in the
   skipped prefixes, so `login-missing` reports them as FAIL although the instance owns them.
