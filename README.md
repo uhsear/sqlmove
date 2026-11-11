@@ -56,6 +56,8 @@ PASS  and checking nothing exits 4, not 0  <-- pinned defect
 ...
 PASS  files that exist and hold no rows run no rule: each is listed as skipped and nothing is checked  <-- pinned defect
 ...
+PASS  a login export with no rows skips every rule that tests a SID or name against it, and fails none  <-- pinned defect
+...
 PASS  a clean verdict with skipped rules says clean covers only the rules that ran  <-- pinned defect
 ...
 PASS  the text NULL, in any case, is an empty permission scope  <-- pinned defect
@@ -71,6 +73,8 @@ PASS  --out naming any file that exists is refused, on a dry run, and the file i
 PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
 ...
 PASS  a bad export exits 3, names the file and column, and writes nothing  <-- pinned defect
+PASS  a headerless file does not print its first data row; the columns are counted  <-- pinned defect
+PASS  a header name the tool does not read is counted, not echoed  <-- pinned defect
 ...
 PASS  a wrong-column integer is quoted back up to 24 characters, like a SID or boolean  <-- pinned defect
 ...
@@ -82,10 +86,10 @@ PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-227 assertions, 0 failed
+232 assertions, 0 failed
 ```
 
-The full run prints all 227 assertions. Each `...` line above is where this block is cut.
+The full run prints all 232 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -110,7 +114,8 @@ anything. It adds four things the commands above do not do:
 - It knows the geodatabase cases: an orphaned `sde` user, versions owned by an orphan and the
   order to clean them up in, and a table grant that its `_evw` view lacks.
 - It reads a skipped check as unchecked. A rule whose file is absent, or whose file holds no row it
-  reads, is listed as skipped. A run that examined no row exits 4, with or without
+  reads, is listed as skipped. So is a rule that tests a SID or name against a login export that
+  holds no row, because that export is what a query without permission returns. A run that examined no row exits 4, with or without
   `--allow-skipped`. A clean run that skipped a rule exits 5, and exits 0 only with that flag.
 - It never decides from `SUSER_SID()`. The two catalog views are the only evidence.
 
@@ -124,10 +129,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 227 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 232 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 992 statements and 238 branches.
+100 percent of 1015 statements and 240 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -497,7 +502,7 @@ The file has a header and one row per finding: `severity`, `rule`, `subject`, `d
 A `subject` or `detail` cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is
 written with one apostrophe in front, so a spreadsheet shows the text and does not run it. The
 names in the exports are the source of such a cell: a database user may be called `=cmd|...`.
-OWASP's [CSV Injection](https://owasp.org/www-community/attacks/CSV_Injection) page lists those
+OWASP's [CSV Injection](https://community.owasp.org/attacks/CSV_Injection) page lists those
 characters and names "Prepend each cell field with a single quote" as one mitigation. Line breaks
 are collapsed to spaces before the check, so a tab or carriage return cannot lead a cell in a real
 run. The check still covers them, and the self-test pins both. The `severity` and `rule` columns
@@ -538,12 +543,12 @@ check" are different facts, and a scheduled job must not read one as the other.
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 225 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 232 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 992 statements, 238 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 1015 statements, 240 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | The author made hand-picked edits to the decision core and the CLI on copies, and the self-test failed on every one that changed behaviour. The harness is not shipped, so a reader cannot rerun that sweep and the count is not claimed. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 227 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
-| No cell value from a column the tool does not read reaches stdout or a file; a refused file's header names are listed | A canary value in an unread column, searched for in the output and in `findings.csv` |
+| Identical on both hosts | The same 232 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| No cell value from a column the tool does not read reaches stdout or a file; a refused file lists only the header names the tool knows and counts the rest | A canary value in an unread column, searched for in the output and in `findings.csv`. A headerless file with a canary in its first row, and a header name the tool does not read, are pinned too. |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
 | A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Thirteen hand-made edits to the guard (each lead dropped, each field left unguarded, the guard before the line-break collapse, the apostrophe doubled or dropped) were rerun by a reviewer: twelve failed the self-test and one was an equivalent mutant. The `inject` run above shows four of its seven rows, cut at the `...`. |
 | Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file on a dry run fails it. |
@@ -632,8 +637,10 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **A value in the wrong column can reach the screen.** A cell that fails SID, integer or boolean
   parsing is quoted back, up to 24 characters, in the REFUSED message. An integer cell is read with
   Python's `int()`, so `server_id` also accepts underscores and non-ASCII digits, such as `1_0`.
-  A real export never holds these. The header names of a refused
-  file are listed too. Keep a secret column out of an export.
+  A real export never holds these. A refused file lists only the header names that
+  the tool knows (the column names it reads, in any export) and counts the other columns, so
+  neither a header name nor a headerless file's first row reaches the screen. Keep a secret
+  column out of an export anyway.
 - **Ctrl-C ends the process with the interpreter's own status**, not one of the exit codes above.
 - **Read the whole export in memory.** Each file is read whole before it is parsed, so a very large
   export uses memory in proportion to its size. Output is not capped: 200,000 dependency rows
@@ -682,9 +689,15 @@ check" are different facts, and a scheduled job must not read one as the other.
   the report to a file instead.
 - **Bracketed names in the advice text are not escaped.** A name that contains a closing bracket
   must be doubled by hand before the `CREATE LOGIN` line is run.
-- **An empty `server_principals.csv` makes every instance-authenticated database user report as an
-  orphan.** Check that the file holds at least the `sa` row before you trust the verdict.
+- **A `server_principals.csv` with a header and no rows skips `orphan-user`, `version-owner`,
+  `job-owner` and `login-missing`.** A real instance always has the `sa` login, so an empty file
+  means too little permission. `job-copy` does not need the list and still runs. A file with only
+  some rows, because of missing permission, is not detected (see the partial-catalog limit below).
 - **The REFUSED text is written to stdout**, so a log that captures stdout keeps the quoted cell.
+- **Only the findings file is guarded against formulas.** The report on stdout is printed as it
+  is, so do not pipe it into a spreadsheet.
+- **A cell led by a character that the guard does not list is written as it came.** Examples are
+  `|` and a full-width lead. The tool does not claim that a spreadsheet runs them.
 - **A failed `--apply` run can leave a partial findings file.** The file is opened so that it is
   never overwritten, so the next run refuses the same `--out` with exit 64 until you delete the
   file or name a new one.
@@ -696,8 +709,8 @@ check" are different facts, and a scheduled job must not read one as the other.
   from Microsoft's `sqlcmd` utility page.
 - **The dashed header line and `-h -1` are behaviours seen in practice.** They are not cited to
   Microsoft.
-- **A file with no header row is refused, and its first data row is printed as if it were the
-  header.** Do not export a secret into the first row of a headerless file.
+- **A file with no header row is refused.** Its first row is read as the header, so a cell in it
+  that is not a column name the tool knows is counted and not printed.
 - **A directory named like an export**, for example `server_principals.csv/`, is skipped as if the
   file were absent. The run reports the rule as skipped (exit 4 or 5) and never says that the path
   is a directory.

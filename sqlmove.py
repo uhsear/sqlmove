@@ -78,6 +78,8 @@ FILES = {
     "versions": ("name", "owner"),
 }
 
+KNOWN_COLUMNS = frozenset(c for cols in FILES.values() for c in cols)
+
 SID_COLUMNS = ("sid", "owner_sid")
 
 # SYS and INFORMATION_SCHEMA in sys.database_principals have a NULL SID. Every
@@ -540,6 +542,11 @@ RULES = (
 )
 
 
+# Rules that fail a name or SID for being absent from server_principals.
+LOGIN_LIST_RULES = ("orphan-user", "version-owner", "job-owner",
+                    "login-missing")
+
+
 def run_checks(data, target_major=None):
     """Run every rule whose files are present. A skipped rule is recorded."""
     findings, ran, skipped = [], [], []
@@ -556,6 +563,11 @@ def run_checks(data, target_major=None):
             # A header-only file is what a query run in the wrong database, or
             # with too little permission, returns. It checked nothing.
             skipped.append((name, "examined no rows"))
+            continue
+        if name in LOGIN_LIST_RULES and not data["server_principals"]:
+            # An empty login list is the no-permission signature. Every user,
+            # job and source login would fail against it, so nothing is told.
+            skipped.append((name, "server_principals.csv holds no rows"))
             continue
         findings.extend(got)
         ran.append((name, examined,
@@ -663,8 +675,13 @@ def load_table(path, stem):
     names = [h.strip().casefold() for h in header]
     absent = [c for c in wanted if c not in names]
     if absent:
-        raise InputError("%s: columns not in the CSV: %s. It has: %s"
-                         % (path, ", ".join(absent), ", ".join(names)))
+        # A file with no header row would print its first data row here, so
+        # only names this tool knows are echoed; the rest are counted.
+        shown = [n for n in names if n in KNOWN_COLUMNS]
+        raise InputError("%s: columns not in the CSV: %s. It has %d "
+                         "column(s); the names this tool knows are: %s"
+                         % (path, ", ".join(absent), len(names),
+                            ", ".join(shown) or "none"))
     index = dict((c, names.index(c)) for c in wanted)
     rows = []
     previous = reader.line_num
@@ -1210,6 +1227,22 @@ def _self_test(tmp):
                                    "examined no rows" in l for l in lines),
           "and the verdict counts only the rules that examined a row  "
           "<-- pinned defect")
+    nologin = {"server_principals": [],
+               "database_principals": [dp("ann", "a1")],
+               "versions": [ver("q3", "ann")],
+               "jobs": [jb("nightly", "a1")],
+               "source_server_principals": [sp("ann", "a1")]}
+    report = run_checks(nologin)
+    check(report.fails == 0 and report.ran == [] and gate(report) == 4
+          and all(dict(report.skipped)[r] == "server_principals.csv holds "
+                  "no rows" for r in LOGIN_LIST_RULES),
+          "a login export with no rows skips every rule that tests a SID or "
+          "name against it, and fails none  <-- pinned defect")
+    nologin["source_jobs"] = [jb("weekly", "a1")]
+    report = run_checks(nologin)
+    check([f.rule for f in report.findings] == ["job-copy"]
+          and [r[0] for r in report.ran] == ["job-copy"],
+          "job-copy does not read logins as a list, so it still runs")
     allclean = {
         "server_principals": [sp("sa", "01"), sp("edit_a", "a002"),
                               sp("CORP\\svc", "b001", "U")],
@@ -1733,6 +1766,27 @@ def _self_test(tmp):
           "a bad export exits 3, names the file and column, and writes "
           "nothing  <-- pinned defect")
     raw_put(refused_dir, "versions", "name,owner\nv1,x\n")
+    headless_dir = os.path.join(tmp, "headless")
+    write_demo(headless_dir)
+    raw_put(headless_dir, "server_principals",
+            "sa,0x01,S,CANARY-SECRET-123\nann,0xA1,S,x\n")
+    code, out, err = run_cli([headless_dir])
+    check(code == 3 and "columns not in the CSV: name, sid, type" in out
+          and "canary" not in (out + err).lower()
+          and "It has 4 column(s)" in out,
+          "a headerless file does not print its first data row; the columns "
+          "are counted  <-- pinned defect")
+    raw_put(headless_dir, "server_principals",
+            "name,sid,Extra,password_hash\nsa,0x01,x,CANARY-SECRET-123\n")
+    code, out, err = run_cli([headless_dir])
+    check(code == 3 and "the names this tool knows are: name, sid" in out
+          and "password_hash" not in out and "canary" not in out.lower(),
+          "a header name the tool does not read is counted, not echoed  "
+          "<-- pinned defect")
+    raw_put(headless_dir, "server_principals", "foo,bar\nx,y\n")
+    code, out, err = run_cli([headless_dir])
+    check(code == 3 and "are: none" in out,
+          "a file with no known column says none")
     raw_put(refused_dir, "databases", "name\n" + "x" * 140000 + "\n")
     code, out, err = run_cli([refused_dir])
     check(code == 2 and "field larger than field limit" in err,
