@@ -1105,7 +1105,7 @@ def _self_test(tmp):
     check(not any("edit_d" in f.subject for f in got),
           "a database-level grant covers the view")
     check(not any("edit_f" in f.subject for f in got),
-          "CONTROL on the view covers a table SELECT")
+          "a CONTROL grant on the view covers a table SELECT")
     check(not any("edit_m" in f.subject for f in got),
           "schema, table and grantee names are matched ignoring case")
     check(not any(s in f.subject for f in got
@@ -1158,7 +1158,7 @@ def _self_test(tmp):
                                    pm("ctl", "DELETE", "sites_evw")]}, None)
     check(names(got) == [("evw-grant", FAIL, "dbo.sites_evw / ctl")]
           and got[0].detail.startswith("CONTROL"),
-          "CONTROL on the table is expected as CONTROL on the view; four "
+          "a CONTROL grant on the table is expected as CONTROL on the view; four "
           "data grants do not stand in for it")
 
     # ---- running the rules, and what a skipped rule means

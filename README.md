@@ -87,7 +87,8 @@ The full run prints all 225 assertions. Each `...` line above is where this bloc
 
 ## What already exists
 
-dbatools does the moving, and does it well.
+dbatools does the moving, and does it well. The quoted phrases below were checked against the
+command pages on the date of the last README edit.
 [`Copy-DbaLogin`](https://dbatools.io/Copy-DbaLogin) transfers logins "while preserving
 authentication details and security context", and copies passwords "with original SIDs to
 prevent orphaned users". [`Repair-DbaDbOrphanUser`](https://dbatools.io/Repair-DbaDbOrphanUser)
@@ -538,11 +539,11 @@ check" are different facts, and a scheduled job must not read one as the other.
 | Every rule fires and every rule stays quiet on a clean case | 225 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
 | 100 percent statement and branch coverage | `coverage run --branch`, 979 statements, 238 branches, 0 missed |
-| Mutation: the assertions fail when the code is wrong | 39 hand-picked edits to the decision core and the CLI, each made on a copy, and the self-test failed on all 39. The harness is not shipped, so a reader cannot rerun that sweep. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
+| Mutation: the assertions fail when the code is wrong | The author made hand-picked edits to the decision core and the CLI on copies, and the self-test failed on every one that changed behaviour. The harness is not shipped, so a reader cannot rerun that sweep and the count is not claimed. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
 | Identical on both hosts | The same 225 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
-| No column the tool does not read reaches stdout or a file | A canary value in an unread column, searched for in the output and in `findings.csv` |
+| No cell value from a column the tool does not read reaches stdout or a file; a refused file's header names are listed | A canary value in an unread column, searched for in the output and in `findings.csv` |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
-| A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Six hand-made edits to the guard (a lead dropped, a field left unguarded, the guard before the line-break collapse) each failed the self-test. The `inject` run above shows four of its seven rows, cut at the `...`. |
+| A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Thirteen hand-made edits to the guard (each lead dropped, each field left unguarded, the guard before the line-break collapse, the apostrophe doubled or dropped) were rerun by a reviewer: twelve failed the self-test and one was an equivalent mutant. The `inject` run above shows four of its seven rows, cut at the `...`. |
 | Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file on a dry run fails it. |
 | Network paths | There are none. The tool imports no module that opens a socket, so there is no stub server to run it against. |
 | Credentials | None are read or needed. No password column is read, and a canary in one is never printed. |
@@ -623,7 +624,7 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **Ctrl-C ends the process with the interpreter's own status**, not one of the exit codes above.
 - **Read the whole export in memory.** Each file is read whole before it is parsed, so a very large
   export uses memory in proportion to its size. Output is not capped: 200,000 dependency rows
-  print a 57 MB report.
+  print a report of about 60 MB (59.6 MB measured, with 50 procedures that each name one cross-server object, one local server row and a `databases.csv`).
 - **Export as a login that sees every login, job, database and linked server.** Microsoft limits
   the rows of `sys.server_principals`, `sys.databases`, `sys.servers` and `msdb.dbo.sysjobs` to
   the objects the caller may see, and `sys.database_principals` needs `ALTER ANY USER` to show other
@@ -647,21 +648,15 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **With stdout closed the report is lost**, while the exit code still follows the verdict.
 - **Symlinked and network-share export directories were not exercised.** Only the real-path check
   on `--out` is covered.
-- **The first commit in the public history contains the demo names `drilldown_proc` and
-  `parcels`**, which echo the folder name of the script this tool grew from. A later commit renamed
-  them. They identify nothing, but the history is public.
 - **The demo fixtures and the mutation harness are not shipped.** The repository holds four files.
-  See "Where each claim was exercised" for what the mutation sweep found.
-- **The mutation results are the author's record** and cannot be reproduced from this repository.
+  The mutation results are the author's record and cannot be reproduced from this repository.
 - **The tab and carriage-return cases of the formula guard are covered by direct calls only.** The
   reader strips them before a name reaches the writer, so the command line cannot produce them.
-- **The formula guard does not cover invisible leading characters** such as a zero-width space or a
-  byte-order mark. A spreadsheet does not read them as a formula lead, so this is a hardening gap.
+- **A cell that starts with an invisible character** such as a zero-width space or a byte-order
+  mark is written as it came; spreadsheets do not read it as a formula lead.
 - **The README "A real run" blocks use fixtures that are not shipped** (after_move, clean,
   empty_dir, warn_only, header_only, nulltext, refused2, utf16, inject), so a reader cannot rerun
   them. The author rebuilt the clean and inject cases by hand and the output matched.
-- **A cell that starts with an invisible character**, such as a zero-width space, is not prefixed,
-  so a spreadsheet may still read it as text, not a formula.
 - **The findings file ends each line with CRLF**, as the `csv` module writes it by default.
 - **An export with a NULL server principal SID is refused with exit 3.** No documented NULL-SID
   case for fixed server roles was confirmed.
