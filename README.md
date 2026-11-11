@@ -64,6 +64,8 @@ PASS  a table grant exported with the text NULL as its column still reaches evw-
 ...
 PASS  after the dry runs and the --apply run the export directory holds the same files with the same bytes  <-- pinned defect
 ...
+PASS  an orphan user named like a formula is written to the findings file with one apostrophe, whatever it starts with, and a name with those characters inside is untouched  <-- pinned defect
+...
 PASS  --out naming any file that exists is refused, on a dry run, and the file is untouched  <-- pinned defect
 ...
 PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
@@ -77,10 +79,10 @@ PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-199 assertions, 0 failed
+222 assertions, 0 failed
 ```
 
-The full run prints all 199 assertions. Each `...` line above is where this block is cut.
+The full run prints all 222 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -117,10 +119,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 199 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 222 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 948 statements and 230 branches.
+100 percent of 974 statements and 238 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -480,6 +482,29 @@ sqlmove.py: error: unrecognized arguments: --ap
 
 The file has a header and one row per finding: `severity`, `rule`, `subject`, `detail`.
 
+A `subject` or `detail` cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is
+written with one apostrophe in front, so a spreadsheet shows the text and does not run it. The
+names in the exports are the source of such a cell: a database user may be called `=cmd|...`.
+OWASP's [CSV Injection](https://owasp.org/www-community/attacks/CSV_Injection) page lists those
+characters and names "Prepend each cell field with a single quote" as one mitigation. Line breaks
+are collapsed to spaces before the check, so a tab or carriage return cannot lead a cell in a real
+run. The check still covers them, and the self-test pins both. The `severity` and `rule` columns
+are constants of the tool and are not changed. The file has no numeric column. The tool never
+reads its own findings file, so it has no strip on read. An export that holds a name starting with
+an apostrophe is read as it is.
+
+```
+$ python3 sqlmove.py inject --out inject.csv --apply
+...
+wrote inject.csv
+$ cut -d, -f1-3 inject.csv
+severity,rule,subject
+FAIL,orphan-user,'=cmd|' /c calc'!A1
+FAIL,orphan-user,'+SUM(1;1)
+FAIL,orphan-user,'-2+3
+FAIL,orphan-user,'@SUM(1)
+```
+
 ## Exit codes
 
 | Code | Meaning |
@@ -501,13 +526,14 @@ check" are different facts, and a scheduled job must not read one as the other.
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 199 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 222 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 948 statements, 230 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 974 statements, 238 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | 39 hand-picked edits to the decision core and the CLI, each made on a copy, and the self-test failed on all 39. The harness is not shipped, so a reader cannot rerun that sweep. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 199 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 222 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No column the tool does not read reaches stdout or a file | A canary value in an unread column, searched for in the output and in `findings.csv` |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
+| A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Six hand-made edits to the guard (a lead dropped, a field left unguarded, the guard before the line-break collapse) each failed the self-test. The `inject` run above used four of those names. |
 | Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file on a dry run fails it. |
 | Network paths | There are none. The tool imports no module that opens a socket, so there is no stub server to run it against. |
 | Credentials | None are read or needed. No password column is read, and a canary in one is never printed. |
@@ -540,8 +566,11 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **A hole is not a value.** A version with no owner is not examined. A job with no `owner_sid` is
   an export problem and is refused.
 - **Output files are written in place**, not through a temporary file. A failed write can leave a
-  partial file, and the exit code is 2. A finding that starts with `=`, `+`, `-` or `@` is written
-  as it came; quote it before opening the file in a spreadsheet.
+  partial file, and the exit code is 2.
+- **The formula guard covers the six characters above.** OWASP's page also lists a line feed and
+  full-width variants of `=` and `+`. A line feed cannot lead a cell here, because line breaks are
+  collapsed first. A full-width lead is written as it came. The apostrophe is shown by a spreadsheet
+  only as text, so a program that reads the findings file back must strip one leading apostrophe.
 - **`--self-test` ignores every other flag.** It writes only to a temporary directory, which it
   removes at the end, even when an assertion raises. A killed process, or Ctrl-C, can leave an
   empty `sqlmove-selftest-*` directory in the temp folder.

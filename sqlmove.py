@@ -612,9 +612,25 @@ def describe(report):
     return lines
 
 
+# A spreadsheet runs a cell that starts with one of these as a formula. OWASP,
+# "CSV Injection": the characters are = + - @, tab (0x09) and carriage return
+# (0x0D); the mitigation is a single quote in front of the cell.
+FORMULA_LEADS = ("=", "+", "-", "@", chr(9), chr(13))
+
+
+def cell(value):
+    """A findings cell that a spreadsheet will not run as a formula."""
+    if value[:1] in FORMULA_LEADS:
+        return "'" + value
+    return value
+
+
 def findings_rows(report):
+    # severity and rule are constants of this file, so they are not guarded;
+    # subject and detail carry names from the exports.
     return [{"severity": f.severity, "rule": f.rule,
-             "subject": _one_line(f.subject), "detail": _one_line(f.detail)}
+             "subject": cell(_one_line(f.subject)),
+             "detail": cell(_one_line(f.detail))}
             for f in report.findings]
 
 
@@ -1295,6 +1311,35 @@ def _self_test(tmp):
                                     "subject": "a b", "detail": "x y"}],
           "the findings file holds one line per finding too")
 
+    # ---- formula injection: a text cell that starts with = + - @, tab or CR
+    # gets one apostrophe in front, as OWASP's CSV Injection page advises.
+    for lead, label in (("=", "an equals sign"), ("+", "a plus sign"),
+                        ("-", "a minus sign"), ("@", "an at sign"),
+                        (chr(9), "a tab"), (chr(13), "a carriage return")):
+        check(cell(lead + "x") == "'" + lead + "x",
+              "a cell that starts with %s gets one apostrophe  "
+              "<-- pinned defect" % label)
+    check(cell("abc") == "abc" and cell("a=b+c-d@e") == "a=b+c-d@e"
+          and cell("") == "" and cell("'=x") == "'=x",
+          "a cell that does not start with a formula character, an empty "
+          "cell and a cell already led by an apostrophe pass unchanged")
+    for field, other in (("subject", "detail"), ("detail", "subject")):
+        for lead, label in (("=", "equals"), ("+", "plus"), ("-", "minus"),
+                            ("@", "at"), (chr(9) + "=", "tab then equals"),
+                            (chr(13) + "@", "CR then at")):
+            injected = Finding("r", FAIL, "s", "s")._replace(
+                **{field: lead + "1+1"})
+            row = findings_rows(Report([injected], [], [], []))[0]
+            check(row[field] == "'" + lead.lstrip(chr(9) + chr(13)) + "1+1"
+                  and row[other] == "s",
+                  "the findings %s field led by %s is written with one "
+                  "apostrophe and the other field is untouched  "
+                  "<-- pinned defect" % (field, label))
+    plain = findings_rows(Report([Finding("-r", "=s", "x", "y")], [], [], []))
+    check(plain == [{"severity": "=s", "rule": "-r", "subject": "x",
+                     "detail": "y"}],
+          "the rule and severity columns are constants and are not guarded")
+
     # ---- reading an export
     d = os.path.join(tmp, "read")
     put(d, "server_principals", ["name", "sid", "type"],
@@ -1539,6 +1584,36 @@ def _self_test(tmp):
         check("canary-hash" not in handle.read(),
               "and no unread column reaches the findings file  "
               "<-- pinned defect")
+    # Names that start like a formula, through the CLI, into the file, and
+    # back out with the csv module.
+    inj = os.path.join(tmp, "inject")
+    put(inj, "server_principals", ["name", "sid", "type"],
+        [["ok_login", "0xA0", "S"]])
+    put(inj, "database_principals", ["name", "sid", "authentication_type_desc"],
+        [["=cmd|' /c calc'!A1", "0xB1", "INSTANCE"],
+         ["+SUM(1;1)", "0xB2", "INSTANCE"], ["-2+3", "0xB3", "INSTANCE"],
+         ["@SUM(1)", "0xB4", "INSTANCE"],
+         [chr(9) + "=tab", "0xB5", "INSTANCE"],
+         [chr(13) + "@cr", "0xB6", "INSTANCE"], ["a-b=c", "0xB7", "INSTANCE"]])
+    inj_out = os.path.join(tmp, "inject.csv")
+    code, out, err = run_cli([inj, "--out", inj_out, "--apply"])
+    with io.open(inj_out, encoding="utf-8", newline="") as handle:
+        inj_rows = list(csv.DictReader(handle))
+    check(code == 1 and sorted(r["subject"] for r in inj_rows) == sorted([
+        "'=cmd|' /c calc'!A1", "'+SUM(1;1)", "'-2+3", "'@SUM(1)", "'=tab",
+        "'@cr", "a-b=c"]),
+        "an orphan user named like a formula is written to the findings "
+        "file with one apostrophe, whatever it starts with, and a name with "
+        "those characters inside is untouched  <-- pinned defect")
+    check(not any(r["subject"][:1] in FORMULA_LEADS for r in inj_rows)
+          and not any(r["detail"][:1] in FORMULA_LEADS for r in inj_rows),
+          "no subject or detail cell in the written file starts with a "
+          "formula character  <-- pinned defect")
+    put(inj, "database_principals", ["name", "sid", "authentication_type_desc"],
+        [["'=lit", "0xB1", "INSTANCE"]])
+    check(read_export(inj)["database_principals"][0]["name"] == "'=lit",
+          "an export is read as it is: the tool never reads its own findings "
+          "file, so it strips no apostrophe on read")
     check(snapshot(demo) == demo_before and len(demo_before) == len(FILES),
           "after the dry runs and the --apply run the export directory holds "
           "the same files with the same bytes  <-- pinned defect")
