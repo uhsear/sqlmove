@@ -56,6 +56,7 @@ PASS  and checking nothing exits 4, not 0  <-- pinned defect
 ...
 PASS  files that exist and hold no rows run no rule: each is listed as skipped and nothing is checked  <-- pinned defect
 ...
+PASS  a header-only database_principals.csv skips version-owner instead of failing every owner  <-- pinned defect
 PASS  a login export with no rows skips every rule that tests a SID or name against it, and fails none  <-- pinned defect
 ...
 PASS  a clean verdict with skipped rules says clean covers only the rules that ran  <-- pinned defect
@@ -75,6 +76,8 @@ PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
 PASS  a bad export exits 3, names the file and column, and writes nothing  <-- pinned defect
 PASS  a headerless file does not print its first data row; the columns are counted  <-- pinned defect
 PASS  a header name the tool does not read is counted, not echoed  <-- pinned defect
+PASS  a quote that is never closed is refused, not folded over the rows after it  <-- pinned defect
+PASS  a quote that closes on a later line folds the rows between: a record that spans lines with the wrong cell count is refused  <-- pinned defect
 ...
 PASS  a wrong-column integer is quoted back up to 24 characters, like a SID or boolean  <-- pinned defect
 ...
@@ -86,10 +89,10 @@ PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-232 assertions, 0 failed
+238 assertions, 0 failed
 ```
 
-The full run prints all 232 assertions. Each `...` line above is where this block is cut.
+The full run prints all 238 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -115,12 +118,13 @@ anything. It adds four things the commands above do not do:
   order to clean them up in, and a table grant that its `_evw` view lacks.
 - It reads a skipped check as unchecked. A rule whose file is absent, or whose file holds no row it
   reads, is listed as skipped. So is a rule that tests a SID or name against a login export that
-  holds no row, because that export is what a query without permission returns. A run that examined no row exits 4, with or without
+  holds no row, because that export is what a query without permission returns. `version-owner` is skipped the same way for an empty `database_principals.csv`. A run that examined no row exits 4, with or without
   `--allow-skipped`. A clean run that skipped a rule exits 5, and exits 0 only with that flag.
 - It never decides from `SUSER_SID()`. The two catalog views are the only evidence.
 
 A search of GitHub for the name `sqlmove` found two unrelated repositories (`sqlmovers`, with no
-description, and a MySQL-to-SQL-Server copier) on the day it was run. Searches for a post-move
+description, and a MySQL-to-SQL-Server copier) before this repository was published; a search
+today also returns this repository. Searches for a post-move
 SQL Server check and for a geodatabase restore check returned no repository. That shows only
 that the searches found nothing.
 
@@ -129,10 +133,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 232 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 238 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 1015 statements and 240 branches.
+100 percent of 1045 statements and 246 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -281,7 +285,7 @@ What the documentation says, and what it does not:
   SQL Server "prior to SQL Server 2022 (16.x)", and says SQL Server Native Client "isn't shipped
   with" SQL Server 2022 and later. That covers every generation, so `SQLNCLI10` and `SQLNCLI11`
   are both FAIL on version 16 or later. From SQL Server 2019 the provider name `SQLNCLI` maps to
-  the Microsoft OLE DB Driver (`sys.servers` page), so the tool does not flag it. `SQLOLEDB` is
+  the Microsoft OLE DB Driver by default (`sys.servers` page), so the tool does not flag it. `SQLOLEDB` is
   WARN: the legacy provider is not recommended, and the pages do not say it is removed.
 - **Versioned view grants.** Esri says that when you grant SELECT, INSERT, UPDATE and DELETE
   through ArcGIS on a traditionally versioned table, "those privileges are automatically granted
@@ -543,14 +547,14 @@ check" are different facts, and a scheduled job must not read one as the other.
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 232 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 238 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 1015 statements, 240 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 1045 statements, 246 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | The author made hand-picked edits to the decision core and the CLI on copies, and the self-test failed on every one that changed behaviour. The harness is not shipped, so a reader cannot rerun that sweep and the count is not claimed. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 232 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 238 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No cell value from a column the tool does not read reaches stdout or a file; a refused file lists only the header names the tool knows and counts the rest | A canary value in an unread column, searched for in the output and in `findings.csv`. A headerless file with a canary in its first row, and a header name the tool does not read, are pinned too. |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
-| A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. Thirteen hand-made edits to the guard (each lead dropped, each field left unguarded, the guard before the line-break collapse, the apostrophe doubled or dropped) were rerun by a reviewer: twelve failed the self-test and one was an equivalent mutant. The `inject` run above shows four of its seven rows, cut at the `...`. |
+| A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. A mutation count is not claimed, because the harness is not shipped. The `inject` run above shows four of its seven rows, cut at the `...`. |
 | Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file on a dry run fails it. |
 | Network paths | There are none. The tool imports no module that opens a socket, so there is no stub server to run it against. |
 | Credentials | None are read or needed. No password column is read, and a canary in one is never printed. |
@@ -589,14 +593,13 @@ check" are different facts, and a scheduled job must not read one as the other.
   collapsed first. A full-width lead is written as it came. The apostrophe is shown by a spreadsheet
   only as text, so a program that reads the findings file back must strip one leading apostrophe.
   It cannot tell an added apostrophe from one that was in the name: a user named `'=lit` and a
-  user named `=lit` both come out as `'=lit`. The guard also skips a lead of U+FEFF or U+200B,
-  which a spreadsheet does not read as a formula lead.
+  user named `=lit` both come out as `'=lit`. The guard also skips a lead of U+FEFF or U+200B.
+  The tool does not claim how a spreadsheet reads them.
 - **Tab and carriage-return leads are pinned by `cell()` and `findings_rows()` calls**, not by an
   end-to-end run, because the reader strips them first. The tab-then-equals case is covered end to
   end: it comes out as `'=tab`.
-- **The mutation count in the "Exercised by" table is a reviewer's record.** The harness is not
-  shipped, so the thirteen-edit count (twelve killed, one equivalent) cannot be rerun from this
-  repository.
+- **No mutation count is claimed.** The harness is not shipped, so a mutation sweep cannot be rerun
+  from this repository.
 - **`--self-test` ignores every other flag.** It writes only to a temporary directory, which it
   removes at the end, even when an assertion raises. A killed process, or Ctrl-C, can leave an
   empty `sqlmove-selftest-*` directory in the temp folder.
@@ -644,12 +647,16 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **Ctrl-C ends the process with the interpreter's own status**, not one of the exit codes above.
 - **Read the whole export in memory.** Each file is read whole before it is parsed, so a very large
   export uses memory in proportion to its size. Output is not capped: 200,000 dependency rows
-  print a report of about 60 MB (59.6 MB measured, with 50 procedures that each name one cross-server object, one local server row and a `databases.csv`).
+  print a report of about 60 MB (62.6 MB, which is 59.7 MiB, measured once with 50 procedures that each name one cross-server object, one local server row and a `databases.csv`).
 - **Export as a login that sees every login, job, database and linked server.** Microsoft limits
   the rows of `sys.server_principals`, `sys.databases`, `sys.servers` and `msdb.dbo.sysjobs` to
   the objects the caller may see, and `sys.database_principals` needs `ALTER ANY USER` to show other
   users. A partial export of those four views gives FAIL lines for objects that exist:
   `orphan-user`, `job-owner`, `login-missing`, `xdb-server` and `xdb-database`. A partial
+  `database_principals.csv` also gives `version-owner` FAIL lines for owners that are users (the
+  message names the cause), and it hides orphans from `orphan-user` with no FAIL. A
+  `database_principals.csv` with a header and no rows skips `version-owner`; a file with a few
+  rows cannot be told from a full one. A partial
   export of `dependencies`, `objects` or `database_permissions` gives no such sign. A row that
   the exporting login cannot see is simply absent, and the tool cannot detect an absent row. A
   hidden cross-server reference or a hidden `_evw` grant gives no FAIL, and the run can exit 5, or
@@ -657,9 +664,11 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **Export with a CSV writer that quotes fields.** A comma inside an unquoted name (`sqlcmd -s,`)
   shifts the columns. Most files are then refused with exit 3, but a shifted
   `database_permissions` row can drop out of `evw-grant` silently.
-- **A cell that starts with an unpaired double quote hides the rows after it.** The CSV reader
-  folds the following lines into one cell, those rows are neither read nor reported, and the run
-  can still exit 0 when other rows are read. A file with only that row exits 4. Compare each export's row count with the instance.
+- **A cell that starts with a double quote that is never closed is refused.** The reader runs in
+  strict mode. A quote left open to the end of the file, or followed by other text, is refused
+  with exit 3 and the line it starts on. A quote that a later line happens to close folds the
+  lines between into one record, which is refused when the record spans lines and its cell count
+  differs from the header. A folded record with exactly the header's cell count is not detected.
 - **A GRANT row and a DENY row for one grantee, permission and object** (from different grantors)
   give a verdict that depends on row order. `evw-grant` keeps the last row it reads.
 - **A dry run does not check that the parent directory of `--out` exists.** The same command with
@@ -673,7 +682,7 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **The tab and carriage-return cases of the formula guard are covered by direct calls only.** The
   reader strips them before a name reaches the writer, so the command line cannot produce them.
 - **A cell that starts with an invisible character** such as a zero-width space or a byte-order
-  mark is written as it came; spreadsheets do not read it as a formula lead.
+  mark is written as it came. The tool does not claim how a spreadsheet reads it.
 - **The README "A real run" blocks use fixtures that are not shipped** (after_move, clean,
   empty_dir, warn_only, header_only, nulltext, refused2, utf16, inject), so a reader cannot rerun
   them. The author rebuilt the clean and inject cases by hand and the output matched.
@@ -738,6 +747,17 @@ check" are different facts, and a scheduled job must not read one as the other.
   required SID, integer or boolean column, the run is refused with exit 3. In
   `database_principals.csv` the `sid` column is optional, so the line is read as a user with an
   empty name and no refusal or warning is given. Delete such lines from the export.
+
+- **Exits 1, 3 and 64 are shown by their output in the "A real run" blocks**, not by an echoed
+  `$?`. Exit 3 is also pinned in the self-test.
+- **Narrative details are not checkable from the repository.** The `SUSER_SID()` rehearsal, the
+  repair command's `Status` column and the larger private export behind `after_move` come from the
+  author's work and are described with changed details.
+- **A control character in a name**, such as ESC, reaches the terminal unchanged on stdout, so a
+  hostile name can redraw or recolour the console. The findings file is not affected.
+- **Export as UTF-8.** A name with bytes that are not valid UTF-8 is compared after replacement
+  characters are substituted, so two different names can compare as equal.
+- **`--self-test` exits 1 on a failed assertion**, the same code as a rule failure.
 
 ## Contributing
 

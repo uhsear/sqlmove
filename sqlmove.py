@@ -262,7 +262,9 @@ def check_version_owner(data, target_major):
         if fold(owner) in orphaned:
             reason = "the owner is an orphaned user and cannot connect"
         elif fold(owner) not in known:
-            reason = "the owner is not a user in this database"
+            reason = ("the owner is not a user in this database (an export "
+                      "made without ALTER ANY USER hides other users, so "
+                      "confirm database_principals.csv first)")
         else:
             continue
         if fold(version["name"]) == "default":
@@ -545,6 +547,9 @@ RULES = (
 # Rules that fail a name or SID for being absent from server_principals.
 LOGIN_LIST_RULES = ("orphan-user", "version-owner", "job-owner",
                     "login-missing")
+# Rules that fail a name for being absent from database_principals. orphan-user
+# is not listed: with no INSTANCE user it already examines no row.
+USER_LIST_RULES = ("version-owner",)
 
 
 def run_checks(data, target_major=None):
@@ -568,6 +573,11 @@ def run_checks(data, target_major=None):
             # An empty login list is the no-permission signature. Every user,
             # job and source login would fail against it, so nothing is told.
             skipped.append((name, "server_principals.csv holds no rows"))
+            continue
+        if name in USER_LIST_RULES and not data["database_principals"]:
+            # An empty user list is the no-permission signature too: every
+            # version owner would fail against it.
+            skipped.append((name, "database_principals.csv holds no rows"))
             continue
         findings.extend(got)
         ran.append((name, examined,
@@ -658,6 +668,25 @@ def findings_rows(report):
 # I/O. Reading the exports and writing the findings.
 # =============================================================================
 
+def _records(reader, path):
+    """(first line, lines spanned, cells) for each record. A quote that is
+    never closed raises InputError; the message names no cell text."""
+    previous = reader.line_num
+    while True:
+        try:
+            raw = next(reader)
+        except StopIteration:
+            return
+        except csv.Error as exc:
+            if "field limit" in str(exc):
+                raise  # not a quote problem: main reports it as exit 2
+            raise InputError("%s line %d: %s. A double quote is probably "
+                             "open. Close it or export with a CSV writer."
+                             % (path, previous + 1, exc))
+        yield previous + 1, reader.line_num - previous, raw
+        previous = reader.line_num
+
+
 def load_table(path, stem):
     """One export as a list of dicts with the columns the rules read."""
     wanted = FILES[stem]
@@ -668,10 +697,12 @@ def load_table(path, stem):
         raise InputError("%s: the file holds NUL characters, which is what a "
                          "UTF-16 file looks like. Save the export as UTF-8."
                          % path)
-    reader = csv.reader(io.StringIO(text, newline=""))
-    header = next(reader, None)
-    if header is None:
+    reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+    records = _records(reader, path)
+    first = next(records, None)
+    if first is None:
         raise InputError("%s: the file is empty, not even a header" % path)
+    header = first[2]
     names = [h.strip().casefold() for h in header]
     absent = [c for c in wanted if c not in names]
     if absent:
@@ -684,12 +715,16 @@ def load_table(path, stem):
                             ", ".join(shown) or "none"))
     index = dict((c, names.index(c)) for c in wanted)
     rows = []
-    previous = reader.line_num
-    for raw in reader:
-        line = previous + 1
-        previous = reader.line_num
+    for line, span, raw in records:
         if not raw:
             continue
+        if span > 1 and len(raw) != len(header):
+            # An open quote folded the lines after it into one record.
+            raise InputError("%s line %d: a quoted cell runs over %d lines "
+                             "and the record has %d cell(s) where the header "
+                             "has %d, so a double quote is probably open. "
+                             "Close it or export with a CSV writer."
+                             % (path, line, span, len(raw), len(header)))
         row = {}
         for column in wanted:
             at = index[column]
@@ -1212,6 +1247,15 @@ def _self_test(tmp):
           "files that exist and hold no rows run no rule: each is listed as "
           "skipped and nothing is checked  <-- pinned defect")
     report = run_checks({"server_principals": [sp("sa", "01")],
+                         "database_principals": [],
+                         "versions": [ver("wip", "edit_b")]})
+    check(report.fails == 0 and report.ran == []
+          and dict(report.skipped)["version-owner"]
+          == "database_principals.csv holds no rows"
+          and gate(report) == 4,
+          "a header-only database_principals.csv skips version-owner instead "
+          "of failing every owner  <-- pinned defect")
+    report = run_checks({"server_principals": [sp("sa", "01")],
                          "database_principals": [dp("dbo", "01")],
                          "objects": [ob("dbo", "sites", "U"),
                                      ob("dbo", "sites_evw", "V")],
@@ -1434,6 +1478,27 @@ def _self_test(tmp):
     raw_put(d2, "versions", "name,owner\n\n\nv2,o\n")
     check(read_export(d2)["versions"] == [{"name": "v2", "owner": "o"}],
           "blank lines are skipped")
+    raw_put(d2, "versions", 'name,owner\n"a\nb",o\n')
+    check(read_export(d2)["versions"] == [{"name": "a\nb", "owner": "o"}],
+          "a quoted cell that holds a line break still reads as one record")
+    raw_put(d2, "versions", 'name,owner\n"Q4 draft,edit_a\nwip,ghost\n')
+    raises(lambda: read_export(d2), "a quote that is never closed is refused, "
+           "not folded over the rows after it  <-- pinned defect",
+           InputError, "line 2: unexpected end of data")
+    raw_put(d2, "versions", 'name,owner\n"Q4,edit_a\nwip,"\nx,y\n')
+    raises(lambda: read_export(d2), "a quote that closes on a later line "
+           "folds the rows between: a record that spans lines with the wrong "
+           "cell count is refused  <-- pinned defect",
+           InputError, "line 2: a quoted cell runs over 2 lines and the "
+           "record has 1 cell(s) where the header has 2")
+    raw_put(d2, "versions", 'name,owner\nok,o\n"x"y,z\n')
+    raises(lambda: read_export(d2), "a stray quote after a closed cell is "
+           "refused with its line number, exit 3 not 2",
+           InputError, "line 3:")
+    code, out, err = run_cli([d2])
+    check(code == 3 and out.startswith("REFUSED   ")
+          and "VERDICT: REFUSED. Nothing was checked." in out,
+          "the same refusal from the command line exits 3")
     # A client such as sqlcmd writes a SQL NULL as the text NULL.
     d4 = os.path.join(tmp, "nulls")
     put(d4, "database_permissions",
