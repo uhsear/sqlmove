@@ -35,8 +35,8 @@ sqlmove self-test: temporary files only, no network, no credentials
 --------------------------------------------------------------------
 ...
 PASS  a Windows user with no login row is an orphan, whatever a directory lookup would say  <-- pinned defect
-PASS  an orphaned Windows user is told FROM WINDOWS and never a SID = option, which CREATE LOGIN allows for SQL logins only  <-- pinned defect
 ...
+PASS  an orphaned Windows user is told FROM WINDOWS and never a SID = option, which CREATE LOGIN allows for SQL logins only  <-- pinned defect
 PASS  a same-name login with another SID names both SIDs and is not called a match  <-- pinned defect
 ...
 PASS  an orphan's version says to delete it before the user is dropped  <-- pinned defect
@@ -44,30 +44,36 @@ PASS  an orphan's version says to delete it before the user is dropped  <-- pinn
 PASS  the missing-server message names the cause and the fix  <-- pinned defect
 ...
 PASS  a loopback name that no longer exists is reported once, as a missing server, not again as a missing database  <-- pinned defect
-...
 PASS  on SQL Server 2022 every Native Client generation fails, and the legacy SQLOLEDB warns  <-- pinned defect
 ...
 PASS  a grant on a versioned table with none on its _evw view is reported  <-- pinned defect
-PASS  a view not named <table>_evw, and a table named <table>_evw, are never paired with the table  <-- pinned defect
 ...
+PASS  a view not named <table>_evw, and a table named <table>_evw, are never paired with the table  <-- pinned defect
 PASS  a table DELETE grant, and a view that holds only a column grant or a grant of another class, are reported  <-- pinned defect
 ...
 PASS  and checking nothing exits 4, not 0  <-- pinned defect
 ...
 PASS  files that exist and hold no rows run no rule: each is listed as skipped and nothing is checked  <-- pinned defect
-...
 PASS  a header-only database_principals.csv skips version-owner instead of failing every owner  <-- pinned defect
+...
 PASS  a login export with no rows skips every rule that tests a SID or name against it, and fails none  <-- pinned defect
 ...
+PASS  a clean run with a skipped rule is exit 5, and exit 0 only with --allow-skipped  <-- pinned defect
+...
 PASS  a clean verdict with skipped rules says clean covers only the rules that ran  <-- pinned defect
+...
+PASS  a quote that is never closed is refused, not folded over the rows after it  <-- pinned defect
+PASS  a quote that closes on a later line folds the rows between: a record that spans lines with the wrong cell count is refused  <-- pinned defect
 ...
 PASS  the text NULL, in any case, is an empty permission scope  <-- pinned defect
 ...
 PASS  a table grant exported with the text NULL as its column still reaches evw-grant, and no server is called NULL  <-- pinned defect
 ...
-PASS  after the dry runs and the --apply run the export directory holds the same files with the same bytes  <-- pinned defect
+PASS  a wrong-column integer is quoted back up to 24 characters, like a SID or boolean  <-- pinned defect
 ...
 PASS  an orphan user named like a formula is written to the findings file with one apostrophe, whatever it starts with, and a name with those characters inside is untouched  <-- pinned defect
+...
+PASS  after the dry runs and the --apply run the export directory holds the same files with the same bytes  <-- pinned defect
 ...
 PASS  --out naming any file that exists is refused, on a dry run, and the file is untouched  <-- pinned defect
 ...
@@ -76,13 +82,8 @@ PASS  a prefix of --apply is refused, not read as --apply  <-- pinned defect
 PASS  a bad export exits 3, names the file and column, and writes nothing  <-- pinned defect
 PASS  a headerless file does not print its first data row; the columns are counted  <-- pinned defect
 PASS  a header name the tool does not read is counted, not echoed  <-- pinned defect
-PASS  a quote that is never closed is refused, not folded over the rows after it  <-- pinned defect
-PASS  a quote that closes on a later line folds the rows between: a record that spans lines with the wrong cell count is refused  <-- pinned defect
-...
-PASS  a wrong-column integer is quoted back up to 24 characters, like a SID or boolean  <-- pinned defect
 ...
 PASS  a directory with no exports exits 4, not 0  <-- pinned defect
-PASS  a clean run with a skipped rule is exit 5, and exit 0 only with --allow-skipped  <-- pinned defect
 PASS  a clean run that skipped rules exits 5, not 0, and says so  <-- pinned defect
 ...
 PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  <-- pinned defect
@@ -504,7 +505,8 @@ sqlmove.py: error: unrecognized arguments: --ap
 The file has a header and one row per finding: `severity`, `rule`, `subject`, `detail`.
 
 A `subject` or `detail` cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is
-written with one apostrophe in front, so a spreadsheet shows the text and does not run it. The
+written with one apostrophe in front. The file holds that one apostrophe; the tool was not run in
+a spreadsheet (see Limits). The
 names in the exports are the source of such a cell: a database user may be called `=cmd|...`.
 OWASP's [CSV Injection](https://community.owasp.org/attacks/CSV_Injection) page lists those
 characters and names "Prepend each cell field with a single quote" as one mitigation. Line breaks
@@ -533,7 +535,7 @@ FAIL,orphan-user,'@SUM(1)
 |---|---|
 | 0 | At least one row was examined, no rule failed and no rule was skipped. Warnings do not change it. With `--allow-skipped`, skipped rules do not change it either. |
 | 1 | At least one rule failed. The move is not verified. |
-| 2 | A file or directory could not be read, or `--out` could not be written. |
+| 2 | A file or directory could not be read, or `--out` could not be written. A failed `--apply` write after a failing rule also exits 2, not 1 (see Limits). |
 | 3 | An export was refused: a missing column, a SID that is not hex, an empty file or a UTF-16 file. |
 | 4 | Nothing was examined. Every rule was skipped, or every file held no rows. A rule whose files hold no rows is listed as skipped. |
 | 5 | No rule failed, and at least one rule was skipped. `--allow-skipped` turns this into 0. |
@@ -590,11 +592,19 @@ check" are different facts, and a scheduled job must not read one as the other.
   partial file, and the exit code is 2.
 - **The formula guard covers the six characters above.** OWASP's page also lists a line feed and
   full-width variants of `=` and `+`. A line feed cannot lead a cell here, because line breaks are
-  collapsed first. A full-width lead is written as it came. The apostrophe is shown by a spreadsheet
-  only as text, so a program that reads the findings file back must strip one leading apostrophe.
+  collapsed first. A full-width lead is written as it came. No spreadsheet was run, so what one shows for
+  the apostrophe was not checked. A program that reads the findings file back must strip one leading apostrophe.
   It cannot tell an added apostrophe from one that was in the name: a user named `'=lit` and a
   user named `=lit` both come out as `'=lit`. The guard also skips a lead of U+FEFF or U+200B.
   The tool does not claim how a spreadsheet reads them.
+- **The formula guard was not run in a spreadsheet.** No Excel or LibreOffice was available, and the
+  self-test checks only the bytes written. OWASP's page says its quote and escape mitigations "are
+  not reliable in Microsoft Excel after saving and re-opening the CSV file", and it names a tab
+  prefix as the option that Excel resists. Quote-style mitigations can fail in Excel after a save
+  and reopen. The apostrophe is what this repository's spec asks for.
+- **A name with a semicolon before a formula**, such as `x;=cmd`, is written unquoted. A
+  spreadsheet whose list separator is a semicolon may split it into a second cell that starts with
+  `=`, and the guard does not cover that cell.
 - **Tab and carriage-return leads are pinned by `cell()` and `findings_rows()` calls**, not by an
   end-to-end run, because the reader strips them first. The tab-then-equals case is covered end to
   end: it comes out as `'=tab`.
@@ -702,6 +712,8 @@ check" are different facts, and a scheduled job must not read one as the other.
   `job-owner` and `login-missing`.** A real instance always has the `sa` login, so an empty file
   means too little permission. `job-copy` does not need the list and still runs. A file with only
   some rows, because of missing permission, is not detected (see the partial-catalog limit below).
+- **The exit-70 traceback goes to stderr and can quote a cell value**, because the handler prints
+  the exception text. Keep stderr from a failed run out of shared logs.
 - **The REFUSED text is written to stdout**, so a log that captures stdout keeps the quoted cell.
 - **Only the findings file is guarded against formulas.** The report on stdout is printed as it
   is, so do not pipe it into a spreadsheet.
