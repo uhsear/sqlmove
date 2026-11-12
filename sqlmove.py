@@ -78,7 +78,15 @@ FILES = {
     "versions": ("name", "owner"),
 }
 
-KNOWN_COLUMNS = frozenset(c for cols in FILES.values() for c in cols)
+# Columns an export may carry and need not. A missing one is not an error. The
+# value is HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER ANY USER'): 1 when
+# the exporting login sees every database user, else 0. The text NULL and an
+# empty cell read as 0, because a caller that cannot tell has not seen them all.
+OPTIONAL_COLUMNS = {
+    "database_principals": ("can_alter_any_user",),
+}
+KNOWN_COLUMNS = frozenset(c for cols in FILES.values() for c in cols) | \
+    frozenset(c for cols in OPTIONAL_COLUMNS.values() for c in cols)
 
 SID_COLUMNS = ("sid", "owner_sid")
 
@@ -299,6 +307,11 @@ def check_job_copy(data, target_major):
                         for r in data["source_server_principals"])
     dest_names = dict((r["sid"], r["name"]) for r in data["server_principals"])
     dest_jobs = dict((fold(j["name"]), j) for j in data["jobs"])
+    # No job on the destination is a real finding, and it is also what a
+    # login that owns no job and has no Agent reader role exports.
+    unseen = ("" if dest_jobs else " jobs.csv holds no rows: if the "
+              "exporting login is not a sysadmin or in SQLAgentReaderRole it "
+              "sees only the jobs it owns, so confirm jobs.csv first.")
     findings = []
     for job in data["source_jobs"]:
         there = dest_jobs.get(fold(job["name"]))
@@ -306,7 +319,8 @@ def check_job_copy(data, target_major):
             findings.append(Finding(
                 "job-copy", FAIL, job["name"],
                 "the job is on the source and not on the destination. Jobs "
-                "live in msdb and do not travel with a restored database."))
+                "live in msdb and do not travel with a restored database.%s"
+                % unseen))
             continue
         was = source_names.get(job["owner_sid"])
         now = dest_names.get(there["owner_sid"])
@@ -554,6 +568,10 @@ USER_LIST_RULES = ("version-owner",)
 # login list without it is a partial export (a login without ALTER ANY LOGIN
 # sees only its own row). Every login-name rule would then judge a short list.
 SA_SID = "01"
+# Rules that read database users, and the ones that read linked servers. See
+# the checks in run_checks for what a partial export of each looks like.
+VISIBLE_USER_RULES = ("orphan-user", "version-owner")
+LOCAL_SERVER_RULES = ("xdb-server", "xdb-database")
 
 
 def _has_sa(rows):
@@ -590,6 +608,27 @@ def run_checks(data, target_major=None):
                 data["source_server_principals"]):
             skipped.append((name, "source_server_principals.csv has no sa "
                                   "row (SID 0x01): a partial export"))
+            continue
+        if name in VISIBLE_USER_RULES and any(
+                row.get("can_alter_any_user") is False
+                for row in data["database_principals"]):
+            # The exporting login lacked ALTER ANY USER, so it saw only its
+            # own row and the system principals. Hidden users cannot fail.
+            skipped.append((name, "database_principals.csv was exported "
+                                  "without ALTER ANY USER: users are hidden"))
+            continue
+        if name in LOCAL_SERVER_RULES and not any(
+                row["server_id"] == 0 for row in data["linked_servers"]):
+            # sys.servers always lists the local server (server_id 0) to every
+            # caller, so a file without it is a partial export.
+            skipped.append((name, "linked_servers.csv has no local server "
+                                  "row (server_id 0): a partial export"))
+            continue
+        if name == "xdb-database" and not any(
+                fold(row["name"]) == "master" for row in data["databases"]):
+            # master and tempdb are visible to every caller of sys.databases.
+            skipped.append((name, "databases.csv has no master row: a "
+                                  "partial export"))
             continue
         if name in USER_LIST_RULES and not data["database_principals"]:
             # An empty user list is the no-permission signature too: every
@@ -731,6 +770,7 @@ def load_table(path, stem):
                          % (path, ", ".join(absent), len(names),
                             ", ".join(shown) or "none"))
     index = dict((c, names.index(c)) for c in wanted)
+    optional = [c for c in OPTIONAL_COLUMNS.get(stem, ()) if c in names]
     rows = []
     for line, span, raw in records:
         if not raw:
@@ -757,6 +797,15 @@ def load_table(path, stem):
                     row[column] = parse_int(row[column])
                 elif column in BOOL_COLUMNS:
                     row[column] = parse_bool(row[column])
+            except ValueError as exc:
+                raise InputError("%s line %d, column %s: %s"
+                                 % (path, line, column, exc))
+        for column in optional:
+            at = names.index(column)
+            seen = raw[at].strip() if at < len(raw) else ""
+            try:
+                row[column] = (seen.upper() not in ("", "NULL")
+                               and parse_bool(seen))
             except ValueError as exc:
                 raise InputError("%s line %d, column %s: %s"
                                  % (path, line, column, exc))
@@ -1361,6 +1410,65 @@ def _self_test(tmp):
           and gate(warn_only, True) == 0,
           "a warning alone never fails the gate")
 
+    # ---- a partial catalog export is skipped, never read as a verdict
+    def partial(**changes):
+        data = dict(allclean)
+        data.update(changes)
+        return run_checks(data, 16)
+
+    for label, files in (
+            ("an empty databases.csv", {"databases": []}),
+            ("a databases.csv without master",
+             {"databases": [{"name": "geodb"}]})):
+        report = partial(**files)
+        check(dict(report.skipped).get("xdb-database") ==
+              "databases.csv has no master row: a partial export"
+              and report.fails == 0 and gate(report) == 5,
+              "%s skips xdb-database, and never fails a database that "
+              "exists  <-- pinned defect" % label)
+    report = partial(databases=[{"name": "MASTER"}])
+    check("xdb-database" not in dict(report.skipped)
+          and report.fails == 1,
+          "a master row, in any case, lets xdb-database run")
+    for label, rows in (("an empty linked_servers.csv", []),
+                        ("one with no row for the local server",
+                         [sv(1, "link_erp")])):
+        report = partial(linked_servers=rows)
+        skipped = dict(report.skipped)
+        check(skipped.get("xdb-server") == skipped.get("xdb-database") ==
+              "linked_servers.csv has no local server row (server_id 0): a "
+              "partial export" and report.fails == 0,
+              "%s skips xdb-server and xdb-database, and never fails a "
+              "server that exists  <-- pinned defect" % label)
+    check(("linked-provider", 1, 0, 0) in partial(
+        linked_servers=[sv(1, "link_erp")]).ran,
+          "linked-provider does not need the local server row and still runs")
+    hidden = [dict(dp("dbo", "01"), can_alter_any_user=False),
+              dict(dp("edit_a", "a002"), can_alter_any_user=False)]
+    report = partial(database_principals=hidden)
+    check(dict(report.skipped).get("orphan-user") == dict(
+        report.skipped).get("version-owner") == "database_principals.csv "
+        "was exported without ALTER ANY USER: users are hidden"
+        and gate(report) == 5,
+        "an export made without ALTER ANY USER skips orphan-user and "
+        "version-owner, never a clean exit 0  <-- pinned defect")
+    seen = [dict(row, can_alter_any_user=True) for row in hidden]
+    report = partial(database_principals=seen)
+    check(report.skipped == []
+          and gate(report) == 0 and len(report.ran) == 9,
+          "the same export made with ALTER ANY USER runs every rule")
+    nojobs = partial(jobs=[])
+    check(dict(nojobs.skipped).get("job-owner") == "examined no rows"
+          and [f.rule for f in nojobs.findings] == ["job-copy"]
+          and "jobs.csv holds no rows" in nojobs.findings[0].detail
+          and "SQLAgentReaderRole" in nojobs.findings[0].detail
+          and gate(nojobs) == 1,
+          "a destination with no jobs still fails a missing job, and says "
+          "to confirm that the export could see jobs  <-- pinned defect")
+    check("jobs.csv holds no rows" not in check_job_copy(
+        dict(copy, jobs=[jb("x", "b001")]), None)[0][-1].detail,
+          "the note is left off when the destination holds a job")
+
     # ---- the report text
     lines = describe(run_checks({"jobs": [jb("n", "a002")],
                                  "server_principals": logins}))
@@ -1923,6 +2031,15 @@ def _self_test(tmp):
     code, out, err = run_cli([empty, "--require-all"])
     check(code == 4 and "INCOMPLETE" not in out,
           "--require-all keeps exit 4 for a run that examined nothing")
+    for flags, want in (([], 5), (["--allow-skipped"], 0)):
+        clean_out = os.path.join(tmp, "clean_%d.csv" % want)
+        code, out, err = run_cli([clean, "--out", clean_out, "--apply"]
+                                 + flags)
+        with io.open(clean_out, "rb") as handle:
+            written = handle.read()
+        check(code == want and written == b"severity,rule,subject,detail\r\n",
+              "a clean run with --apply --out writes a findings file with a "
+              "header and no row, and exits %d" % want)
     for low_high in ("9", "99"):
         code, out, err = run_cli([clean, "--target-major", low_high])
         check(code == 5 and "INCOMPLETE" in out,
@@ -1983,6 +2100,69 @@ def _self_test(tmp):
           and "\nFAIL  " not in out,
           "a destination login list without the sa row skips every "
           "login-name rule  <-- pinned defect")
+
+    # End to end: partial catalogs and the optional ALTER ANY USER column.
+    part = os.path.join(tmp, "partial_catalog")
+    put(part, "server_principals", ["name", "sid", "type"],
+        [["sa", "0x01", "S"], ["edit_a", "0xA002", "S"]])
+    put(part, "database_principals",
+        ["name", "sid", "authentication_type_desc", "can_alter_any_user"],
+        [["dbo", "0x01", "NONE", "0"], ["edit_a", "0xA002", "INSTANCE", "0"]])
+    put(part, "dependencies",
+        ["referencing_name", "referenced_server_name",
+         "referenced_database_name", "referenced_schema_name",
+         "referenced_entity_name"],
+        [["usp_pull", "", "geodb", "dbo", "sites"]])
+    put(part, "linked_servers",
+        ["server_id", "name", "provider", "is_data_access_enabled"], [])
+    put(part, "databases", ["name"], [])
+    code, out, err = run_cli([part])
+    check(code == 4 and "\nFAIL  " not in out and "without ALTER ANY USER"
+          in out and "no local server row" in out,
+          "headers-only catalog views and a user list from a login without "
+          "ALTER ANY USER examine nothing: exit 4, no FAIL  "
+          "<-- pinned defect")
+    put(part, "linked_servers",
+        ["server_id", "name", "provider", "is_data_access_enabled"],
+        [["0", "srv_new", "NULL", "1"]])
+    code, out, err = run_cli([part])
+    check(code == 4 and "\nFAIL  " not in out and "databases.csv has no "
+          "master row" in out and "no local server row" not in out,
+          "an empty databases.csv skips xdb-database on the command line, "
+          "and a local server row lets xdb-server read the file")
+    put(part, "database_principals",
+        ["name", "sid", "authentication_type_desc", "can_alter_any_user"],
+        [["dbo", "0x01", "NONE", "1"], ["edit_a", "0xA002", "INSTANCE",
+                                          "NULL"]])
+    code, out, err = run_cli([part])
+    check(code == 4 and "without ALTER ANY USER" in out,
+          "the text NULL in the column reads as no, because a caller that "
+          "cannot tell has not seen every user")
+    put(part, "database_principals",
+        ["name", "sid", "authentication_type_desc", "can_alter_any_user"],
+        [["dbo", "0x01", "NONE", "1"], ["edit_a", "0xA002", "INSTANCE",
+                                          " 1 "]])
+    code, out, err = run_cli([part])
+    check(code == 5 and "without ALTER ANY USER" not in out
+          and "orphan-user" in out, "with the column at 1 orphan-user runs")
+    put(part, "database_principals",
+        ["name", "sid", "authentication_type_desc", "can_alter_any_user"],
+        [["dbo", "0x01", "NONE", "yes"]])
+    code, out, err = run_cli([part])
+    check(code == 3 and "column can_alter_any_user" in out
+          and "not 0, 1, true or false" in out,
+          "a value in that column that is not a boolean is refused with "
+          "exit 3, never a crash  <-- pinned defect")
+    put(part, "database_principals", ["name", "sid", "authentication_type_desc"],
+        [["dbo", "0x01", "NONE"], ["edit_a", "0xA002", "INSTANCE"]])
+    code, out, err = run_cli([part])
+    check(code == 5 and "without ALTER ANY USER" not in out,
+          "a file with no such column is read as before")
+    raw_put(part, "database_principals",
+            "name,sid,authentication_type_desc,can_alter_any_user\n"
+            "edit_a,0xA002,INSTANCE\n")
+    check(read_export(part)["database_principals"][0]["can_alter_any_user"]
+          is False, "a short row reads the column as no")
 
     # A crash is not a finding.
     real_run = globals()["run_checks"]

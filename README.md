@@ -60,6 +60,14 @@ PASS  a login export with no rows skips every rule that tests a SID or name agai
 ...
 PASS  a clean run with a skipped rule is exit 5, and exit 0 only with --allow-skipped  <-- pinned defect
 ...
+PASS  a databases.csv without master skips xdb-database, and never fails a database that exists  <-- pinned defect
+...
+PASS  one with no row for the local server skips xdb-server and xdb-database, and never fails a server that exists  <-- pinned defect
+...
+PASS  an export made without ALTER ANY USER skips orphan-user and version-owner, never a clean exit 0  <-- pinned defect
+...
+PASS  a destination with no jobs still fails a missing job, and says to confirm that the export could see jobs  <-- pinned defect
+...
 PASS  a clean verdict with skipped rules says clean covers only the rules that ran  <-- pinned defect
 ...
 PASS  a quote that is never closed is refused, not folded over the rows after it  <-- pinned defect
@@ -86,17 +94,23 @@ PASS  a header name the tool does not read is counted, not echoed  <-- pinned de
 PASS  a directory with no exports exits 4, not 0  <-- pinned defect
 PASS  a clean run that skipped rules exits 5, not 0, and says so  <-- pinned defect
 ...
+PASS  a clean run with --apply --out writes a findings file with a header and no row, and exits 5
+...
 PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  <-- pinned defect
 ...
 PASS  a source login list without the sa row skips login-missing, never a clean exit 0  <-- pinned defect
 PASS  the same source list with its sa row still fails the missing login
 PASS  a destination login list without the sa row skips every login-name rule  <-- pinned defect
+PASS  headers-only catalog views and a user list from a login without ALTER ANY USER examine nothing: exit 4, no FAIL  <-- pinned defect
+...
+PASS  a value in that column that is not a boolean is refused with exit 3, never a crash  <-- pinned defect
+...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-241 assertions, 0 failed
+260 assertions, 0 failed
 ```
 
-The full run prints all 241 assertions. Each `...` line above is where this block is cut.
+The full run prints all 260 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -137,10 +151,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 241 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 260 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 1068 statements and 250 branches.
+100 percent of 1143 statements and 264 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -187,7 +201,7 @@ your version.
 | File | Catalog view | Columns read |
 |---|---|---|
 | `server_principals.csv` | [`sys.server_principals`](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-server-principals-transact-sql) | `name`, `sid`, `type` |
-| `database_principals.csv` | `sys.database_principals` | `name`, `sid`, `authentication_type_desc` |
+| `database_principals.csv` | [`sys.database_principals`](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-database-principals-transact-sql) | `name`, `sid`, `authentication_type_desc`, and optionally `can_alter_any_user` |
 | `database_permissions.csv` | [`sys.database_permissions`](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-database-permissions-transact-sql) | `class_desc`, `schema_name`, `object_name`, `column_name`, `grantee`, `permission_name`, `state_desc` |
 | `objects.csv` | `sys.objects` | `schema_name`, `object_name`, `type` |
 | `jobs.csv` | [`msdb.dbo.sysjobs`](https://learn.microsoft.com/en-us/sql/relational-databases/system-tables/dbo-sysjobs-transact-sql) | `name`, `owner_sid` |
@@ -202,8 +216,10 @@ your version.
 -- server_principals.csv, source_server_principals.csv (SID as 0x hex: CONVERT style 1)
 SELECT name, CONVERT(varchar(172), sid, 1) AS sid, type FROM sys.server_principals;
 
--- database_principals.csv (run in the geodatabase)
-SELECT name, CONVERT(varchar(172), sid, 1) AS sid, authentication_type_desc
+-- database_principals.csv (run in the geodatabase). can_alter_any_user is optional: 1 when the
+-- login sees every database user, 0 when it sees only its own row and the system principals.
+SELECT name, CONVERT(varchar(172), sid, 1) AS sid, authentication_type_desc,
+       HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER ANY USER') AS can_alter_any_user
 FROM sys.database_principals;
 
 -- jobs.csv, source_jobs.csv
@@ -242,6 +258,24 @@ WHERE p.class IN (0, 1, 3);
 -- columns. Check INFORMATION_SCHEMA.COLUMNS in your release, then export name and owner.
 ```
 
+**Partial exports.** Three catalog views list some rows to every caller and hide the rest, so the
+tool looks for a row that every caller sees and skips the rules that depend on the file when that
+row is absent. `databases.csv` must hold `master`: Microsoft says a caller sees any database that
+is `master` or `tempdb`, or the one it is connected to, and needs `ALTER ANY DATABASE`,
+`VIEW ANY DATABASE` or `CREATE DATABASE` to see the others
+([sys.databases](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-databases-transact-sql)).
+`linked_servers.csv` must hold the local server, `server_id` 0: the page says permissions are not
+required to view it
+([sys.servers](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-servers-transact-sql)).
+A file without the row skips `xdb-database` or `xdb-server` and `xdb-database`, and the report says
+why. The user list has no such row, so `HAS_PERMS_BY_NAME` supplies one. It returns 1 when the
+caller holds the effective permission and 0 when it does not
+([HAS_PERMS_BY_NAME](https://learn.microsoft.com/en-us/sql/t-sql/functions/has-perms-by-name-transact-sql)).
+Microsoft says other users appear only to a caller with `ALTER ANY USER` or a permission on the
+user. When the column is present and any row holds 0, the text `NULL` or nothing, `orphan-user`
+and `version-owner` are skipped. When the column is absent the tool reads the file as before and
+cannot tell a short user list from a full one.
+
 `sys.database_principals` documents a NULL SID for `SYS` and `INFORMATION_SCHEMA`. An empty SID is
 accepted there and nowhere else, and a user that authenticates through the instance with no SID
 is an orphan.
@@ -259,13 +293,13 @@ and without the dashed line `sqlcmd` prints under a header (`-h -1` with your ow
 
 | Rule | Needs | FAIL when | Source |
 |---|---|---|---|
-| `orphan-user` | `server_principals`, `database_principals` | An `INSTANCE` user's SID is in no login. A same-name login with another SID is named as such, never as a match. | [Microsoft: orphaned users](https://learn.microsoft.com/en-us/sql/sql-server/failover-clusters/troubleshoot-orphaned-users-sql-server) gives the same query. |
-| `version-owner` | the two above, `versions` | A version's owner is an orphan or is not a user. The message gives the order: do not drop the user first. | [Esri: delete a traditional version](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/overview/delete-a-traditional-version.html) |
+| `orphan-user` | `server_principals`, `database_principals` | An `INSTANCE` user's SID is in no login. Skipped when `can_alter_any_user` is 0. A same-name login with another SID is named as such, never as a match. | [Microsoft: orphaned users](https://learn.microsoft.com/en-us/sql/sql-server/failover-clusters/troubleshoot-orphaned-users-sql-server) gives the same query. |
+| `version-owner` | the two above, `versions` | A version's owner is an orphan or is not a user. The message gives the order: do not drop the user first. Skipped when `can_alter_any_user` is 0. | [Esri: delete a traditional version](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/overview/delete-a-traditional-version.html) |
 | `job-owner` | `server_principals`, `jobs` | The owner SID matches no login. | [Microsoft: metadata on another server](https://learn.microsoft.com/en-us/sql/relational-databases/databases/manage-metadata-when-making-a-database-available-on-another-server) |
 | `job-copy` | `source_jobs`, `jobs`, both principals | A job is on the source and not the destination. WARN when its owner changed. | same page |
 | `login-missing` | both principals | A source login is absent, or has another SID. Logins that start with `##`, `NT SERVICE\` or `NT AUTHORITY\` are skipped. | same page |
-| `xdb-server` | `dependencies`, `linked_servers` | A four-part name names a server that is not in `sys.servers`, or a linked server with data access off. WARN for the local server's own name. | [sys.sql_expression_dependencies](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sql-expression-dependencies-transact-sql), [sys.servers](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-servers-transact-sql) |
-| `xdb-database` | `dependencies`, `linked_servers`, `databases` | A cross-database name names a database that is not on the instance. | same pages |
+| `xdb-server` | `dependencies`, `linked_servers` | A four-part name names a server that is not in `sys.servers`, or a linked server with data access off. WARN for the local server's own name. Skipped when `linked_servers.csv` has no `server_id` 0 row. | [sys.sql_expression_dependencies](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-sql-expression-dependencies-transact-sql), [sys.servers](https://learn.microsoft.com/en-us/sql/relational-databases/system-catalog-views/sys-servers-transact-sql) |
+| `xdb-database` | `dependencies`, `linked_servers`, `databases` | A cross-database name names a database that is not on the instance. Skipped when `databases.csv` has no `master` row or `linked_servers.csv` has no `server_id` 0 row. | same pages |
 | `linked-provider` | `linked_servers`, `--target-major` | `SQLNCLI10` or `SQLNCLI11` on `--target-major` 16 or later. WARN for `SQLOLEDB`. | [SQL Server Native Client](https://learn.microsoft.com/en-us/sql/relational-databases/native-client/sql-server-native-client) |
 | `evw-grant` | `objects`, `database_permissions` | A table grants SELECT, INSERT, UPDATE, DELETE or CONTROL to a principal, and its `<table>_evw` view does not, by object, schema or database grant. A DENY is named as a denial. | [Esri: privileges](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/manage-sql-server/privileges-sqlserver.html), [Esri: what a versioned view is](https://desktop.arcgis.com/en/arcmap/latest/manage-data/using-sql-with-gdbs/what-is-a-versioned-view.htm) |
 
@@ -541,7 +575,7 @@ FAIL,orphan-user,'@SUM(1)
 | 2 | A file or directory could not be read, or `--out` could not be written. A failed `--apply` write after a failing rule also exits 2, not 1 (see Limits). |
 | 3 | An export was refused: a missing column, a SID that is not hex, an empty file or a UTF-16 file. |
 | 4 | Nothing was examined. Every rule was skipped, or every file held no rows. A rule whose files hold no rows is listed as skipped. |
-| 5 | No rule failed, and at least one rule was skipped. `--allow-skipped` turns this into 0. |
+| 5 | No rule failed, and at least one rule was skipped, including a rule skipped for a partial export. `--allow-skipped` turns this into 0. Exit 0 and exit 5 both leave one case open: a `database_principals.csv` exported without the `can_alter_any_user` column hides users from `orphan-user` with no sign. |
 | 64 | Usage error, including an unknown or abbreviated flag, a bad `--target-major`, and an `--out` that is an input or already exists. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
@@ -552,17 +586,18 @@ check" are different facts, and a scheduled job must not read one as the other.
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 241 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 260 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 1068 statements, 250 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 1143 statements, 264 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | The author made hand-picked edits to the decision core and the CLI on copies, and the self-test failed on every one that changed behaviour. The harness is not shipped, so a reader cannot rerun that sweep and the count is not claimed. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 241 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 260 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No cell value from a column the tool does not read reaches stdout or a file; a refused file lists only the header names the tool knows and counts the rest | A canary value in an unread column, searched for in the output and in `findings.csv`. A headerless file with a canary in its first row, and a header name the tool does not read, are pinned too. |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
 | A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. A mutation count is not claimed, because the harness is not shipped. The `inject` run above shows four of its seven rows, cut at the `...`. |
+| A partial catalog export is skipped, not judged | Core and command-line assertions for an empty or master-less `databases.csv`, a `linked_servers.csv` without `server_id` 0, a user list exported without `ALTER ANY USER`, and a destination with no jobs. The column's text `NULL`, a short row, a value that is not a boolean, and a file without the column are pinned too. The author disabled each guard on a copy and the self-test failed on every copy. |
 | Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file into that directory on a dry run fails it. A stray file written elsewhere, for example the working directory, is not watched. |
 | Network paths | There are none. The tool imports no module that opens a socket, so there is no stub server to run it against. |
-| Credentials | None are read or needed. No password column is read, and a canary in one is never printed. |
+| Credentials | None are read or needed. No password column is read, and a canary in a column the tool does not read is never printed. |
 
 ## Limits
 
@@ -662,29 +697,40 @@ check" are different facts, and a scheduled job must not read one as the other.
   export, or a special file linked as an export, can use all memory and exit 70 and is not refused.
   A very large export uses memory in proportion to its size. Output is not capped: 200,000 dependency rows
   print a report of about 60 MB (62.6 MB, which is 59.7 MiB, measured once with 50 procedures that each name one cross-server object, one local server row and a `databases.csv`).
-- **Export as a login that sees every login, job, database and linked server.** Microsoft limits
-  the rows of `sys.server_principals`, `sys.databases` and `msdb.dbo.sysjobs` to
-  the objects the caller may see. For `sys.servers` the page says that with the default login mapping every login sees every linked server, so a short list there needs an admin change, and `sys.database_principals` needs `ALTER ANY USER` to show other
-  users. A partial export of those four views gives FAIL lines for objects that exist:
-  `orphan-user`, `job-owner`, `login-missing`, `xdb-server` and `xdb-database`. A partial
-  `database_principals.csv` also gives `version-owner` FAIL lines for owners that are users (the
-  message names the cause), and it hides orphans from `orphan-user` with no FAIL. A
-  `database_principals.csv` with a header and no rows skips `version-owner`; a file with a few
-  rows cannot be told from a full one. A partial
-  export of `dependencies`, `objects` or `database_permissions` gives no such sign. A row that
-  the exporting login cannot see is simply absent, and the tool cannot detect an absent row. A
-  hidden cross-server reference or a hidden `_evw` grant gives no FAIL, and the run can exit 5, or
-  0 with `--allow-skipped`. Compare each export's row count with the instance.
+- **Export as a login that sees every login, job, database, linked server and user.** Microsoft
+  says any login sees its own entry, the system logins and the fixed server roles in
+  `sys.server_principals`, and needs `ALTER ANY LOGIN` or a permission on the login to see the
+  rest. The `sys.databases` page names the permissions that show every database. For `sys.servers`
+  the page says that with the default login mapping every login sees every linked server, so a
+  short list there needs an admin change, and SQL Server 2022 and later require
+  `VIEW SERVER SECURITY STATE`. `sys.database_principals` needs `ALTER ANY USER` to show other
+  users. The Agent roles page says a member of `SQLAgentUserRole` has permissions on only the jobs
+  it owns and a member of `SQLAgentReaderRole` can list all jobs
+  ([SQL Server Agent fixed database roles](https://learn.microsoft.com/en-us/ssms/agent/sql-server-agent-fixed-database-roles)).
+  It does not say what a direct `SELECT` on `msdb.dbo.sysjobs` returns, so run the job queries as
+  a `sysadmin`. The tool detects four partial exports: a login list without `sa`, a `databases.csv`
+  without `master`, a `linked_servers.csv` without `server_id` 0, and a `database_principals.csv`
+  whose `can_alter_any_user` column holds 0. It skips the rules that depend on the file and exits 5.
+  It does not detect a short list that still holds the row it looks for. A short `server_principals`
+  that holds `sa` gives FAIL lines for objects that exist in `orphan-user`, `job-owner` and
+  `login-missing`. A short `databases.csv` that holds `master` does the same in `xdb-database`, and
+  a short `linked_servers.csv` that holds the local server does it in `xdb-server`. A
+  `database_principals.csv` exported without the `can_alter_any_user` column, and without
+  `ALTER ANY USER`, hides users from `orphan-user` with no FAIL, so a clean run (exit 0, or 5 with
+  skipped rules) does not prove that no user is orphaned. Add the column. A hidden version owner
+  does give a `version-owner` FAIL, and the message names the cause. A partial export of
+  `dependencies`, `objects` or `database_permissions` gives no sign either. A row the exporting
+  login cannot see is absent, and the tool cannot detect an absent row. A hidden cross-server
+  reference or a hidden `_evw` grant gives no FAIL, and the run can exit 5, or 0 with
+  `--allow-skipped`. Compare each export's row count with the instance.
 - **Export with a CSV writer that quotes fields.** A comma inside an unquoted name (`sqlcmd -s,`)
   shifts the columns. Most files are then refused with exit 3, but a shifted
   `database_permissions` row can drop out of `evw-grant` silently.
 - **A single-line row with an extra unquoted comma is not refused.** Only a record that spans
   lines has its cell count checked, so a name such as `Edit, v1` in `versions.csv` shifts the
   columns and can give a FAIL line for a wrong owner. Export with a CSV writer that quotes fields.
-- **Not verified: a clean export run with `--apply --out`.** The expected result is a findings
-  file with a header and no rows, and exit 0. A guard hook blocked my one attempt, because it
-  matched the word `--apply`, so I did not retry. The self-test runs `--apply` only with failing
-  findings.
+- **A clean run with `--apply --out` writes a findings file that holds only the header.** It exits 0,
+  or 5 when a rule was skipped. The self-test runs both cases and compares the bytes.
 - **A cell that starts with a double quote that is never closed is refused.** The reader runs in
   strict mode. A quote left open to the end of the file, or followed by other text, is refused
   with exit 3 and the line it starts on. A quote that a later line happens to close folds the
@@ -726,8 +772,9 @@ check" are different facts, and a scheduled job must not read one as the other.
   [principals page](https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/principals-database-engine)
   says the `sa` login is created when an instance is installed and "can't be dropped" (it can be
   renamed or disabled, and its row stays). That its SID is `0x01` is a fact seen in practice, not
-  one that page states. A login without `ALTER ANY LOGIN` sees only its own row, so a file
-  without `sa` is a short one. Then `orphan-user`, `version-owner`, `job-owner` and `login-missing`
+  one that page states. The `sys.server_principals` page says any login sees its own
+  entry and "the system logins", and the tool takes that to include `sa`. A file without `sa` is
+  then a short one. Then `orphan-user`, `version-owner`, `job-owner` and `login-missing`
   are skipped when `server_principals.csv` lacks the row, and `login-missing` is also skipped when
   `source_server_principals.csv` lacks it. The run exits 5, or 0 with `--allow-skipped`. A
   platform with no `sa` login, such as Azure SQL Database, is skipped the same way, so this tool
@@ -743,12 +790,16 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **A failed `--apply` run can leave a partial findings file.** The file is opened so that it is
   never overwritten, so the next run refuses the same `--out` with exit 64 until you delete the
   file or name a new one.
-- **The tool cannot tell a partial catalog from a full one.** Without `VIEW ANY DEFINITION` a
-  login sees only its own entries in `sys.server_principals`, and without the right Agent role it
-  cannot read the `msdb.dbo.sysjobs` rows it does not own. A short export that still holds `sa` can
-  pass `login-missing`, while `orphan-user` and `job-owner` over-report. A short destination
-  `jobs.csv` makes `job-copy` fail a job that exists on the destination, and a short
-  `source_jobs.csv` makes it pass a job that is missing. Run the queries as a `sysadmin`.
+- **The tool cannot tell a short catalog from a full one when the row it looks for is there.**
+  Without `ALTER ANY LOGIN` a login sees only its own entry, the system logins and the fixed
+  server roles in `sys.server_principals`, and without the right Agent role it may see only the
+  jobs it owns (see the bullet above). A short
+  export that still holds `sa` can pass `login-missing`, while `orphan-user` and `job-owner`
+  over-report. A destination `jobs.csv` with no row cannot be told from an instance with no job,
+  because a restore onto a fresh instance has none. `job-copy` fails each missing job and adds
+  a note to confirm that the export could see jobs. A short destination `jobs.csv` with some rows
+  makes `job-copy` fail a job that exists on the destination, and a short `source_jobs.csv`
+  makes it pass a job that is missing. Run the queries as a `sysadmin`.
 - **The statement that `sqlcmd` prints a NULL as the text `NULL` comes from observation**, not
   from Microsoft's `sqlcmd` utility page.
 - **The dashed header line and `-h -1` are behaviours seen in practice.** They are not cited to
