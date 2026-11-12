@@ -104,13 +104,14 @@ PASS  a destination login list without the sa row skips every login-name rule  <
 PASS  headers-only catalog views and a user list from a login without ALTER ANY USER examine nothing: exit 4, no FAIL  <-- pinned defect
 ...
 PASS  a value in that column that is not a boolean is refused with exit 3, never a crash  <-- pinned defect
+PASS  a user list with no can_alter_any_user column skips the user rules, never a clean exit 0  <-- pinned defect
 ...
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-260 assertions, 0 failed
+261 assertions, 0 failed
 ```
 
-The full run prints all 260 assertions. Each `...` line above is where this block is cut.
+The full run prints all 261 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -151,10 +152,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 260 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 261 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 1143 statements and 264 branches.
+100 percent of 1148 statements and 266 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -272,9 +273,8 @@ why. The user list has no such row, so `HAS_PERMS_BY_NAME` supplies one. It retu
 caller holds the effective permission and 0 when it does not
 ([HAS_PERMS_BY_NAME](https://learn.microsoft.com/en-us/sql/t-sql/functions/has-perms-by-name-transact-sql)).
 Microsoft says other users appear only to a caller with `ALTER ANY USER` or a permission on the
-user. When the column is present and any row holds 0, the text `NULL` or nothing, `orphan-user`
-and `version-owner` are skipped. When the column is absent the tool reads the file as before and
-cannot tell a short user list from a full one.
+user. When the column is absent, or any row holds 0, the text `NULL` or nothing, `orphan-user` and
+`version-owner` are skipped, because the tool cannot tell a short user list from a full one.
 
 `sys.database_principals` documents a NULL SID for `SYS` and `INFORMATION_SCHEMA`. An empty SID is
 accepted there and nowhere else, and a user that authenticates through the instance with no SID
@@ -293,8 +293,8 @@ and without the dashed line `sqlcmd` prints under a header (`-h -1` with your ow
 
 | Rule | Needs | FAIL when | Source |
 |---|---|---|---|
-| `orphan-user` | `server_principals`, `database_principals` | An `INSTANCE` user's SID is in no login. Skipped when `can_alter_any_user` is 0. A same-name login with another SID is named as such, never as a match. | [Microsoft: orphaned users](https://learn.microsoft.com/en-us/sql/sql-server/failover-clusters/troubleshoot-orphaned-users-sql-server) gives the same query. |
-| `version-owner` | the two above, `versions` | A version's owner is an orphan or is not a user. The message gives the order: do not drop the user first. Skipped when `can_alter_any_user` is 0. | [Esri: delete a traditional version](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/overview/delete-a-traditional-version.html) |
+| `orphan-user` | `server_principals`, `database_principals` | An `INSTANCE` user's SID is in no login. Skipped when `can_alter_any_user` is 0 or absent. A same-name login with another SID is named as such, never as a match. | [Microsoft: orphaned users](https://learn.microsoft.com/en-us/sql/sql-server/failover-clusters/troubleshoot-orphaned-users-sql-server) gives the same query. |
+| `version-owner` | the two above, `versions` | A version's owner is an orphan or is not a user. The message gives the order: do not drop the user first. Skipped when `can_alter_any_user` is 0 or absent. | [Esri: delete a traditional version](https://doc.esri.com/en/arcgis-pro/latest/help/data/geodatabases/overview/delete-a-traditional-version.html) |
 | `job-owner` | `server_principals`, `jobs` | The owner SID matches no login. | [Microsoft: metadata on another server](https://learn.microsoft.com/en-us/sql/relational-databases/databases/manage-metadata-when-making-a-database-available-on-another-server) |
 | `job-copy` | `source_jobs`, `jobs`, both principals | A job is on the source and not the destination. WARN when its owner changed. | same page |
 | `login-missing` | both principals | A source login is absent, or has another SID. Logins that start with `##`, `NT SERVICE\` or `NT AUTHORITY\` are skipped. | same page |
@@ -358,7 +358,7 @@ What the documentation says, and what it does not:
 `after_move` is a synthetic export of an instance after a move, with one fault planted for each
 rule. Every name, SID and server in it is made up. The run is on Ubuntu with Python 3.12.3. The
 demo directories in this README (`after_move`, `clean`, `empty_dir`, `warn_only`, `header_only`,
-`nulltext`, `refused2` and `utf16`) are not in this repository, which holds four files, so you
+`nulltext`, `refused2`, `utf16` and `inject`) are not in this repository, which holds four files, so you
 cannot rerun these exact blocks. The self-test builds a similar export in a temporary directory.
 The `after_move` run comes from a larger private synthetic export, so its counts are higher than
 the self-test's own demo export. For example, `orphan-user` examined 5 rows and failed 3 there.
@@ -575,7 +575,7 @@ FAIL,orphan-user,'@SUM(1)
 | 2 | A file or directory could not be read, or `--out` could not be written. A failed `--apply` write after a failing rule also exits 2, not 1 (see Limits). |
 | 3 | An export was refused: a missing column, a SID that is not hex, an empty file or a UTF-16 file. |
 | 4 | Nothing was examined. Every rule was skipped, or every file held no rows. A rule whose files hold no rows is listed as skipped. |
-| 5 | No rule failed, and at least one rule was skipped, including a rule skipped for a partial export. `--allow-skipped` turns this into 0. Exit 0 and exit 5 both leave one case open: a `database_principals.csv` exported without the `can_alter_any_user` column hides users from `orphan-user` with no sign. |
+| 5 | No rule failed, and at least one rule was skipped, including a rule skipped for a partial export. `--allow-skipped` turns this into 0. |
 | 64 | Usage error, including an unknown or abbreviated flag, a bad `--target-major`, and an `--out` that is an input or already exists. |
 | 70 | An unexpected crash. This is a fault in the tool and not a finding. The traceback is on stderr. |
 
@@ -586,11 +586,11 @@ check" are different facts, and a scheduled job must not read one as the other.
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 260 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 261 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 1143 statements, 264 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 1148 statements, 266 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | The author made hand-picked edits to the decision core and the CLI on copies, and the self-test failed on every one that changed behaviour. The harness is not shipped, so a reader cannot rerun that sweep and the count is not claimed. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 260 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 261 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No cell value from a column the tool does not read reaches stdout or a file; a refused file lists only the header names the tool knows and counts the rest | A canary value in an unread column, searched for in the output and in `findings.csv`. A headerless file with a canary in its first row, and a header name the tool does not read, are pinned too. |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
 | A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. A mutation count is not claimed, because the harness is not shipped. The `inject` run above shows four of its seven rows, cut at the `...`. |
@@ -606,6 +606,14 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **The export queries were not run here.** No SQL Server was available to this repository's
   tests. The self-test and the demos run on hand-made CSV files that follow the documented column
   names. Run the queries on your own instance and compare a few rows by hand the first time.
+- **`login-missing` reads the one-letter `type` column (S, U, G).** An export of `type_desc`
+  skips the rule with the reason `examined no rows`.
+- **A row with fewer cells than the header is accepted.** Missing cells read as empty, so a file
+  cut off mid-row drops that row silently unless the cut leaves an odd-length hex SID.
+- **File names are matched case-sensitively on Linux.** `Server_Principals.csv` is not found, and
+  its rules are reported as skipped (exit 5), never as clean.
+- **Names compare with Python `casefold`.** That is case-insensitive but not accent-insensitive, so
+  it can differ from a SQL Server collation that ignores accents.
 - **Names compare ignoring case.** That matches the default case-insensitive collations. On a
   case-sensitive collation it can treat two names as one.
 - **Local Windows accounts.** A login such as `HOST\user` carries the old machine name. A move to a
@@ -710,15 +718,12 @@ check" are different facts, and a scheduled job must not read one as the other.
   It does not say what a direct `SELECT` on `msdb.dbo.sysjobs` returns, so run the job queries as
   a `sysadmin`. The tool detects four partial exports: a login list without `sa`, a `databases.csv`
   without `master`, a `linked_servers.csv` without `server_id` 0, and a `database_principals.csv`
-  whose `can_alter_any_user` column holds 0. It skips the rules that depend on the file and exits 5.
+  whose `can_alter_any_user` column holds 0 or is absent. It skips the rules that depend on the file and exits 5.
   It does not detect a short list that still holds the row it looks for. A short `server_principals`
   that holds `sa` gives FAIL lines for objects that exist in `orphan-user`, `job-owner` and
   `login-missing`. A short `databases.csv` that holds `master` does the same in `xdb-database`, and
   a short `linked_servers.csv` that holds the local server does it in `xdb-server`. A
-  `database_principals.csv` exported without the `can_alter_any_user` column, and without
-  `ALTER ANY USER`, hides users from `orphan-user` with no FAIL, so a clean run (exit 0, or 5 with
-  skipped rules) does not prove that no user is orphaned. Add the column. A hidden version owner
-  does give a `version-owner` FAIL, and the message names the cause. A partial export of
+  hidden version owner does give a `version-owner` FAIL, and the message names the cause. A partial export of
   `dependencies`, `objects` or `database_permissions` gives no sign either. A row the exporting
   login cannot see is absent, and the tool cannot detect an absent row. A hidden cross-server
   reference or a hidden `_evw` grant gives no FAIL, and the run can exit 5, or 0 with
@@ -746,8 +751,6 @@ check" are different facts, and a scheduled job must not read one as the other.
   on `--out` is covered.
 - **The demo fixtures and the mutation harness are not shipped.** The repository holds four files.
   The mutation results are the author's record and cannot be reproduced from this repository.
-- **The tab and carriage-return cases of the formula guard are covered by direct calls only.** The
-  reader strips them before a name reaches the writer, so the command line cannot produce them.
 - **A cell that starts with an invisible character** such as a zero-width space or a byte-order
   mark is written as it came. The tool does not claim how a spreadsheet reads it.
 - **The README "A real run" blocks use fixtures that are not shipped** (after_move, clean,
@@ -839,8 +842,6 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **Narrative details are not checkable from the repository.** The `SUSER_SID()` rehearsal, the
   repair command's `Status` column and the larger private export behind `after_move` come from the
   author's work and are described with changed details.
-- **A control character in a name**, such as ESC, reaches the terminal unchanged on stdout, so a
-  hostile name can redraw or recolour the console. The findings file is not affected.
 - **Export as UTF-8.** A name with bytes that are not valid UTF-8 is compared after replacement
   characters are substituted, so two different names can compare as equal.
 - **`--self-test` exits 1 on a failed assertion**, the same code as a rule failure.

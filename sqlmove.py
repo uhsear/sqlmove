@@ -565,8 +565,9 @@ LOGIN_LIST_RULES = ("orphan-user", "version-owner", "job-owner",
 # is not listed: with no INSTANCE user it already examines no row.
 USER_LIST_RULES = ("version-owner",)
 # The sa login has SID 0x01, is created at install and cannot be dropped, so a
-# login list without it is a partial export (a login without ALTER ANY LOGIN
-# sees only its own row). Every login-name rule would then judge a short list.
+# login list without it is a partial export and every login-name rule would
+# judge a short list. A login without ALTER ANY LOGIN still sees sa, so this
+# guard cannot catch that case (README Limits).
 SA_SID = "01"
 # Rules that read database users, and the ones that read linked servers. See
 # the checks in run_checks for what a partial export of each looks like.
@@ -610,12 +611,15 @@ def run_checks(data, target_major=None):
                                   "row (SID 0x01): a partial export"))
             continue
         if name in VISIBLE_USER_RULES and any(
-                row.get("can_alter_any_user") is False
+                row.get("can_alter_any_user") is not True
                 for row in data["database_principals"]):
             # The exporting login lacked ALTER ANY USER, so it saw only its
-            # own row and the system principals. Hidden users cannot fail.
+            # own row and the system principals. Hidden users cannot fail. A
+            # file with no such column cannot say, so it is read the same way.
             skipped.append((name, "database_principals.csv was exported "
-                                  "without ALTER ANY USER: users are hidden"))
+                                  "without ALTER ANY USER, or has no "
+                                  "can_alter_any_user column: users may be "
+                                  "hidden"))
             continue
         if name in LOCAL_SERVER_RULES and not any(
                 row["server_id"] == 0 for row in data["linked_servers"]):
@@ -874,7 +878,8 @@ def _self_test(tmp):
         return {"name": name, "sid": sid, "type": kind}
 
     def dp(name, sid, auth="INSTANCE"):
-        return {"name": name, "sid": sid, "authentication_type_desc": auth}
+        return {"name": name, "sid": sid, "authentication_type_desc": auth,
+                "can_alter_any_user": True}
 
     def jb(name, owner):
         return {"name": name, "owner_sid": owner}
@@ -907,6 +912,11 @@ def _self_test(tmp):
     def put(directory, stem, header, rows, encoding="utf-8"):
         os.makedirs(directory, exist_ok=True)
         path = os.path.join(directory, stem + ".csv")
+        if stem == "database_principals" and len(header) == 3:
+            # A user list says it was exported with ALTER ANY USER, or the
+            # user rules skip. The one test of the absent column uses raw_put.
+            header = header + ["can_alter_any_user"]
+            rows = [row + ["1"] for row in rows]
         with io.open(path, "w", encoding=encoding, newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(header)
@@ -1448,8 +1458,8 @@ def _self_test(tmp):
     report = partial(database_principals=hidden)
     check(dict(report.skipped).get("orphan-user") == dict(
         report.skipped).get("version-owner") == "database_principals.csv "
-        "was exported without ALTER ANY USER: users are hidden"
-        and gate(report) == 5,
+        "was exported without ALTER ANY USER, or has no can_alter_any_user "
+        "column: users may be hidden" and gate(report) == 5,
         "an export made without ALTER ANY USER skips orphan-user and "
         "version-owner, never a clean exit 0  <-- pinned defect")
     seen = [dict(row, can_alter_any_user=True) for row in hidden]
@@ -2153,11 +2163,17 @@ def _self_test(tmp):
           and "not 0, 1, true or false" in out,
           "a value in that column that is not a boolean is refused with "
           "exit 3, never a crash  <-- pinned defect")
-    put(part, "database_principals", ["name", "sid", "authentication_type_desc"],
-        [["dbo", "0x01", "NONE"], ["edit_a", "0xA002", "INSTANCE"]])
+    raw_put(part, "database_principals",
+            "name,sid,authentication_type_desc\n"
+            "dbo,0x01,NONE\nedit_a,0xA002,INSTANCE\n")
     code, out, err = run_cli([part])
-    check(code == 5 and "without ALTER ANY USER" not in out,
-          "a file with no such column is read as before")
+    check(code == 4 and "no can_alter_any_user column" in out
+          and "\nFAIL  " not in out,
+          "a user list with no can_alter_any_user column skips the user "
+          "rules, never a clean exit 0  <-- pinned defect")
+    code, out, err = run_cli([part, "--allow-skipped"])
+    check(code == 4 and "VERDICT: no FAIL" not in out,
+          "and --allow-skipped does not turn that skip into a clean verdict")
     raw_put(part, "database_principals",
             "name,sid,authentication_type_desc,can_alter_any_user\n"
             "edit_a,0xA002,INSTANCE\n")
