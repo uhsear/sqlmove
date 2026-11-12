@@ -88,12 +88,15 @@ PASS  a clean run that skipped rules exits 5, not 0, and says so  <-- pinned def
 ...
 PASS  a name the console cannot encode prints as ? and the run exits 1, not 70  <-- pinned defect
 ...
+PASS  a source login list without the sa row skips login-missing, never a clean exit 0  <-- pinned defect
+PASS  the same source list with its sa row still fails the missing login
+PASS  a destination login list without the sa row skips every login-name rule  <-- pinned defect
 PASS  importing the module prints nothing and exposes the core
 --------------------------------------------------------------------
-238 assertions, 0 failed
+241 assertions, 0 failed
 ```
 
-The full run prints all 238 assertions. Each `...` line above is where this block is cut.
+The full run prints all 241 assertions. Each `...` line above is where this block is cut.
 
 ## What already exists
 
@@ -134,10 +137,10 @@ that the searches found nothing.
 Python 3.9 or newer and nothing else. No `arcpy`, no third-party package, no network, no database
 driver. The input is CSV. Any SQL Server client that can write UTF-8 CSV with NULL as an empty cell or as the text `NULL` will do (see "The exports").
 
-The self-test prints the same 238 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
+The self-test prints the same 241 assertions, line for line, on Windows (Python 3.13.2, 3.12.10
 and 3.9.25) and on Ubuntu (Python 3.12.3). The outputs match byte for byte once Windows carriage
 returns are removed. `coverage run --branch sqlmove.py --self-test` reports
-100 percent of 1045 statements and 246 branches.
+100 percent of 1068 statements and 250 branches.
 
 ```
 git clone https://github.com/uhsear/sqlmove.git
@@ -272,7 +275,7 @@ What the documentation says, and what it does not:
   orphaned after a restore onto an instance where the login was never created, and a login that
   is created again has a different SID. This is why the tool compares SIDs and says a name match
   is not enough.
-- **`SUSER_SID()`.** Its page shows the function used to "obtain the SID from Windows", and it
+- **[`SUSER_SID()`](https://learn.microsoft.com/en-us/sql/t-sql/functions/suser-sid-transact-sql).** Its page shows the function used to "obtain the SID from Windows", and it
   has an option that decides whether the Windows name is checked against the one SQL Server
   stores. The page does not say outright that it answers for a name with no login. The rehearsal
   described above is the evidence for that, and it was seen once. The tool avoids the function
@@ -549,15 +552,15 @@ check" are different facts, and a scheduled job must not read one as the other.
 
 | Claim | Exercised by |
 |---|---|
-| Every rule fires and every rule stays quiet on a clean case | 238 self-test assertions and the `after_move` run above |
+| Every rule fires and every rule stays quiet on a clean case | 241 self-test assertions and the `after_move` run above |
 | Exit codes 0, 1, 2, 3, 4, 5, 64 and 70 | CLI assertions. The real runs above show 0, 1, 3, 4, 5 and 64. |
-| 100 percent statement and branch coverage | `coverage run --branch`, 1045 statements, 246 branches, 0 missed |
+| 100 percent statement and branch coverage | `coverage run --branch`, 1068 statements, 250 branches, 0 missed |
 | Mutation: the assertions fail when the code is wrong | The author made hand-picked edits to the decision core and the CLI on copies, and the self-test failed on every one that changed behaviour. The harness is not shipped, so a reader cannot rerun that sweep and the count is not claimed. The first sweep left one alive, the line number of a record that spans lines. It now has an assertion. |
-| Identical on both hosts | The same 238 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
+| Identical on both hosts | The same 241 assertions, line for line, on Windows 3.13.2, 3.12.10 and 3.9.25 and Ubuntu 3.12.3 |
 | No cell value from a column the tool does not read reaches stdout or a file; a refused file lists only the header names the tool knows and counts the rest | A canary value in an unread column, searched for in the output and in `findings.csv`. A headerless file with a canary in its first row, and a header name the tool does not read, are pinned too. |
 | No network, no subprocess, ASCII only, no f-string | The self-test parses its own source with `ast` and lists the modules it imports |
 | A name that starts like a formula is written with one apostrophe | `cell()` on each of `=`, `+`, `-`, `@`, tab and CR, the same for the subject and detail fields, and a CLI run with `--apply` on an export of seven synthetic user names, read back with the `csv` module. A mutation count is not claimed, because the harness is not shipped. The `inject` run above shows four of its seven rows, cut at the `...`. |
-| Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file on a dry run fails it. |
+| Nothing is written without `--apply` | A snapshot of the export directory (names and bytes) before two dry runs and an `--apply` run, compared after. A copy of the tool that writes a stray file into that directory on a dry run fails it. A stray file written elsewhere, for example the working directory, is not watched. |
 | Network paths | There are none. The tool imports no module that opens a socket, so there is no stub server to run it against. |
 | Credentials | None are read or needed. No password column is read, and a canary in one is never printed. |
 
@@ -656,11 +659,12 @@ check" are different facts, and a scheduled job must not read one as the other.
   column out of an export anyway.
 - **Ctrl-C ends the process with the interpreter's own status**, not one of the exit codes above.
 - **Read the whole export in memory.** Each file is read whole before it is parsed, so a very large
-  export uses memory in proportion to its size. Output is not capped: 200,000 dependency rows
+  export, or a special file linked as an export, can use all memory and exit 70 and is not refused.
+  A very large export uses memory in proportion to its size. Output is not capped: 200,000 dependency rows
   print a report of about 60 MB (62.6 MB, which is 59.7 MiB, measured once with 50 procedures that each name one cross-server object, one local server row and a `databases.csv`).
 - **Export as a login that sees every login, job, database and linked server.** Microsoft limits
-  the rows of `sys.server_principals`, `sys.databases`, `sys.servers` and `msdb.dbo.sysjobs` to
-  the objects the caller may see, and `sys.database_principals` needs `ALTER ANY USER` to show other
+  the rows of `sys.server_principals`, `sys.databases` and `msdb.dbo.sysjobs` to
+  the objects the caller may see. For `sys.servers` the page says that with the default login mapping every login sees every linked server, so a short list there needs an admin change, and `sys.database_principals` needs `ALTER ANY USER` to show other
   users. A partial export of those four views gives FAIL lines for objects that exist:
   `orphan-user`, `job-owner`, `login-missing`, `xdb-server` and `xdb-database`. A partial
   `database_principals.csv` also gives `version-owner` FAIL lines for owners that are users (the
@@ -674,6 +678,13 @@ check" are different facts, and a scheduled job must not read one as the other.
 - **Export with a CSV writer that quotes fields.** A comma inside an unquoted name (`sqlcmd -s,`)
   shifts the columns. Most files are then refused with exit 3, but a shifted
   `database_permissions` row can drop out of `evw-grant` silently.
+- **A single-line row with an extra unquoted comma is not refused.** Only a record that spans
+  lines has its cell count checked, so a name such as `Edit, v1` in `versions.csv` shifts the
+  columns and can give a FAIL line for a wrong owner. Export with a CSV writer that quotes fields.
+- **Not verified: a clean export run with `--apply --out`.** The expected result is a findings
+  file with a header and no rows, and exit 0. A guard hook blocked my one attempt, because it
+  matched the word `--apply`, so I did not retry. The self-test runs `--apply` only with failing
+  findings.
 - **A cell that starts with a double quote that is never closed is refused.** The reader runs in
   strict mode. A quote left open to the end of the file, or followed by other text, is refused
   with exit 3 and the line it starts on. A quote that a later line happens to close folds the
@@ -710,8 +721,18 @@ check" are different facts, and a scheduled job must not read one as the other.
   must be doubled by hand before the `CREATE LOGIN` line is run.
 - **A `server_principals.csv` with a header and no rows skips `orphan-user`, `version-owner`,
   `job-owner` and `login-missing`.** A real instance always has the `sa` login, so an empty file
-  means too little permission. `job-copy` does not need the list and still runs. A file with only
-  some rows, because of missing permission, is not detected (see the partial-catalog limit below).
+  means too little permission. `job-copy` does not need the list and still runs.
+- **A login list with no `sa` row (SID `0x01`) is treated as a partial export.** Microsoft's
+  [principals page](https://learn.microsoft.com/en-us/sql/relational-databases/security/authentication-access/principals-database-engine)
+  says the `sa` login is created when an instance is installed and "can't be dropped" (it can be
+  renamed or disabled, and its row stays). That its SID is `0x01` is a fact seen in practice, not
+  one that page states. A login without `ALTER ANY LOGIN` sees only its own row, so a file
+  without `sa` is a short one. Then `orphan-user`, `version-owner`, `job-owner` and `login-missing`
+  are skipped when `server_principals.csv` lacks the row, and `login-missing` is also skipped when
+  `source_server_principals.csv` lacks it. The run exits 5, or 0 with `--allow-skipped`. A
+  platform with no `sa` login, such as Azure SQL Database, is skipped the same way, so this tool
+  does not check it. A short list that still holds `sa` is not detected (see the partial-catalog
+  limit below).
 - **The exit-70 traceback goes to stderr and can quote a cell value**, because the handler prints
   the exception text. Keep stderr from a failed run out of shared logs.
 - **The REFUSED text is written to stdout**, so a log that captures stdout keeps the quoted cell.
@@ -724,8 +745,10 @@ check" are different facts, and a scheduled job must not read one as the other.
   file or name a new one.
 - **The tool cannot tell a partial catalog from a full one.** Without `VIEW ANY DEFINITION` a
   login sees only its own entries in `sys.server_principals`, and without the right Agent role it
-  cannot read the `msdb.dbo.sysjobs` rows it does not own. A short export can pass `login-missing`
-  and `job-copy` while `orphan-user` and `job-owner` over-report. Run the queries as a `sysadmin`.
+  cannot read the `msdb.dbo.sysjobs` rows it does not own. A short export that still holds `sa` can
+  pass `login-missing`, while `orphan-user` and `job-owner` over-report. A short destination
+  `jobs.csv` makes `job-copy` fail a job that exists on the destination, and a short
+  `source_jobs.csv` makes it pass a job that is missing. Run the queries as a `sysadmin`.
 - **The statement that `sqlcmd` prints a NULL as the text `NULL` comes from observation**, not
   from Microsoft's `sqlcmd` utility page.
 - **The dashed header line and `-h -1` are behaviours seen in practice.** They are not cited to

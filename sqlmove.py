@@ -550,6 +550,14 @@ LOGIN_LIST_RULES = ("orphan-user", "version-owner", "job-owner",
 # Rules that fail a name for being absent from database_principals. orphan-user
 # is not listed: with no INSTANCE user it already examines no row.
 USER_LIST_RULES = ("version-owner",)
+# The sa login has SID 0x01, is created at install and cannot be dropped, so a
+# login list without it is a partial export (a login without ALTER ANY LOGIN
+# sees only its own row). Every login-name rule would then judge a short list.
+SA_SID = "01"
+
+
+def _has_sa(rows):
+    return any(r["sid"] == SA_SID for r in rows)
 
 
 def run_checks(data, target_major=None):
@@ -573,6 +581,15 @@ def run_checks(data, target_major=None):
             # An empty login list is the no-permission signature. Every user,
             # job and source login would fail against it, so nothing is told.
             skipped.append((name, "server_principals.csv holds no rows"))
+            continue
+        if name in LOGIN_LIST_RULES and not _has_sa(data["server_principals"]):
+            skipped.append((name, "server_principals.csv has no sa row "
+                                  "(SID 0x01): a partial export"))
+            continue
+        if name == "login-missing" and not _has_sa(
+                data["source_server_principals"]):
+            skipped.append((name, "source_server_principals.csv has no sa "
+                                  "row (SID 0x01): a partial export"))
             continue
         if name in USER_LIST_RULES and not data["database_principals"]:
             # An empty user list is the no-permission signature too: every
@@ -1709,7 +1726,7 @@ def _self_test(tmp):
     # back out with the csv module.
     inj = os.path.join(tmp, "inject")
     put(inj, "server_principals", ["name", "sid", "type"],
-        [["ok_login", "0xA0", "S"]])
+        [["sa", "0x01", "S"], ["ok_login", "0xA0", "S"]])
     put(inj, "database_principals", ["name", "sid", "authentication_type_desc"],
         [["=cmd|' /c calc'!A1", "0xB1", "INSTANCE"],
          ["+SUM(1;1)", "0xB2", "INSTANCE"], ["-2+3", "0xB3", "INSTANCE"],
@@ -1931,12 +1948,41 @@ def _self_test(tmp):
     # An upper-case SID in jobs.csv matches a lower-case login SID.
     up = os.path.join(tmp, "upper")
     put(up, "server_principals", ["name", "sid", "type"],
-        [["svc", "0xb001", "U"]])
+        [["sa", "0x01", "S"], ["svc", "0xb001", "U"]])
     put(up, "jobs", ["name", "owner_sid"], [["nightly", "0XB001"]])
     code, out, err = run_cli([up, "--allow-skipped"])
     check(code == 0 and "\nFAIL  " not in out,
           "a job owner SID written as 0X in capitals matches the login  "
           "<-- pinned defect")
+
+    # A login list without sa (SID 0x01) is a partial export: its rules skip.
+    nosa = os.path.join(tmp, "nosa_source")
+    put(nosa, "server_principals", ["name", "sid", "type"],
+        [["sa", "0x01", "S"], ["svc", "0xb001", "U"]])
+    put(nosa, "source_server_principals", ["name", "sid", "type"],
+        [["report_login", "0xA050", "S"]])
+    put(nosa, "source_jobs", ["name", "owner_sid"], [["nightly", "0xb001"]])
+    put(nosa, "jobs", ["name", "owner_sid"], [["nightly", "0xb001"]])
+    code, out, err = run_cli([nosa])
+    check(code == 5 and "source_server_principals.csv has "
+          "no sa row (SID 0x01): a partial export" in out
+          and "VERDICT: no FAIL" in out and "\nFAIL  " not in out,
+          "a source login list without the sa row skips login-missing, never "
+          "a clean exit 0  <-- pinned defect")
+    put(nosa, "source_server_principals", ["name", "sid", "type"],
+        [["sa", "0x01", "S"], ["ops_login", "0xA060", "S"]])
+    code, out, err = run_cli([nosa])
+    check(code == 1 and "FAIL  login-missing  ops_login" in out,
+          "the same source list with its sa row still fails the missing login")
+    put(nosa, "server_principals", ["name", "sid", "type"],
+        [["svc", "0xb001", "U"]])
+    put(nosa, "database_principals", ["name", "sid", "authentication_type_desc"],
+        [["u", "0xB9", "INSTANCE"]])
+    code, out, err = run_cli([nosa])
+    check(code == 5 and out.count("  server_principals.csv has no sa row") == 3
+          and "\nFAIL  " not in out,
+          "a destination login list without the sa row skips every "
+          "login-name rule  <-- pinned defect")
 
     # A crash is not a finding.
     real_run = globals()["run_checks"]
