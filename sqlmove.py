@@ -78,12 +78,21 @@ FILES = {
     "versions": ("name", "owner"),
 }
 
-# Columns an export may carry and need not. A missing one is not an error. The
-# value is HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'ALTER ANY USER'): 1 when
-# the exporting login sees every database user, else 0. The text NULL and an
+# Columns an export may carry and need not. A missing one is not an error. Each
+# says whether the exporting login could see every row of its catalog view:
+#   can_alter_any_user:  HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE',
+#                        'ALTER ANY USER'), every database user
+#   can_alter_any_login: HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY LOGIN'),
+#                        every login
+#   can_view_definition: HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE',
+#                        'VIEW DEFINITION'), every object and every grant
+# The value is 1 when the login sees them all, else 0. The text NULL and an
 # empty cell read as 0, because a caller that cannot tell has not seen them all.
 OPTIONAL_COLUMNS = {
     "database_principals": ("can_alter_any_user",),
+    "server_principals": ("can_alter_any_login",),
+    "source_server_principals": ("can_alter_any_login",),
+    "database_permissions": ("can_view_definition",),
 }
 KNOWN_COLUMNS = frozenset(c for cols in FILES.values() for c in cols) | \
     frozenset(c for cols in OPTIONAL_COLUMNS.values() for c in cols)
@@ -567,7 +576,7 @@ USER_LIST_RULES = ("version-owner",)
 # The sa login has SID 0x01, is created at install and cannot be dropped, so a
 # login list without it is a partial export and every login-name rule would
 # judge a short list. A login without ALTER ANY LOGIN still sees sa, so this
-# guard cannot catch that case (README Limits).
+# guard cannot catch that case, so the can_alter_any_login column says it.
 SA_SID = "01"
 # Rules that read database users, and the ones that read linked servers. See
 # the checks in run_checks for what a partial export of each looks like.
@@ -577,6 +586,11 @@ LOCAL_SERVER_RULES = ("xdb-server", "xdb-database")
 
 def _has_sa(rows):
     return any(r["sid"] == SA_SID for r in rows)
+
+
+def _unseen(rows, column):
+    """True when any row does not say the exporting login saw every row."""
+    return any(row.get(column) is not True for row in rows)
 
 
 def run_checks(data, target_major=None):
@@ -609,6 +623,36 @@ def run_checks(data, target_major=None):
                 data["source_server_principals"]):
             skipped.append((name, "source_server_principals.csv has no sa "
                                   "row (SID 0x01): a partial export"))
+            continue
+        if name in LOGIN_LIST_RULES and _unseen(data["server_principals"],
+                                                "can_alter_any_login"):
+            # A login without ALTER ANY LOGIN still sees sa, itself and the
+            # system logins, so the sa row cannot show a short list. Hidden
+            # logins would read as absent and fail every user, owner and job
+            # that maps to one.
+            skipped.append((name, "server_principals.csv was exported "
+                                  "without ALTER ANY LOGIN, or has no "
+                                  "can_alter_any_login column: logins may be "
+                                  "hidden"))
+            continue
+        if name == "login-missing" and _unseen(
+                data["source_server_principals"], "can_alter_any_login"):
+            # Hidden source logins are logins the rule never compares.
+            skipped.append((name, "source_server_principals.csv was "
+                                  "exported without ALTER ANY LOGIN, or has "
+                                  "no can_alter_any_login column: logins may "
+                                  "be hidden"))
+            continue
+        if name == "evw-grant" and _unseen(data["database_permissions"],
+                                           "can_view_definition"):
+            # Without VIEW DEFINITION on the database a login sees only the
+            # objects it holds a permission on and only its own grants. A
+            # hidden grant or a hidden table is not a missing one, and no row
+            # in the file can say so.
+            skipped.append((name, "database_permissions.csv was exported "
+                                  "without VIEW DEFINITION on the database, "
+                                  "or has no can_view_definition column: "
+                                  "grants and objects may be hidden"))
             continue
         if name in VISIBLE_USER_RULES and any(
                 row.get("can_alter_any_user") is not True
@@ -875,7 +919,8 @@ def _self_test(tmp):
 
     # ---- row builders. Every name, SID and server here is synthetic.
     def sp(name, sid, kind="S"):
-        return {"name": name, "sid": sid, "type": kind}
+        return {"name": name, "sid": sid, "type": kind,
+                "can_alter_any_login": True}
 
     def dp(name, sid, auth="INSTANCE"):
         return {"name": name, "sid": sid, "authentication_type_desc": auth,
@@ -901,7 +946,8 @@ def _self_test(tmp):
            cls="OBJECT_OR_COLUMN", column=""):
         return {"class_desc": cls, "schema_name": schema, "object_name": obj,
                 "column_name": column, "grantee": grantee,
-                "permission_name": permission, "state_desc": state}
+                "permission_name": permission, "state_desc": state,
+                "can_view_definition": True}
 
     def ver(name, owner):
         return {"name": name, "owner": owner}
@@ -916,6 +962,12 @@ def _self_test(tmp):
             # A user list says it was exported with ALTER ANY USER, or the
             # user rules skip. The one test of the absent column uses raw_put.
             header = header + ["can_alter_any_user"]
+            rows = [row + ["1"] for row in rows]
+        if stem in ("server_principals", "source_server_principals")                 and len(header) == 3:
+            header = header + ["can_alter_any_login"]
+            rows = [row + ["1"] for row in rows]
+        if stem == "database_permissions" and len(header) == 7:
+            header = header + ["can_view_definition"]
             rows = [row + ["1"] for row in rows]
         with io.open(path, "w", encoding=encoding, newline="") as handle:
             writer = csv.writer(handle)
@@ -1569,8 +1621,10 @@ def _self_test(tmp):
     put(d, "server_principals", ["name", "sid", "type"],
         [["a", "0x0A01", "S"], ["b", "0x0b02", "U"]])
     check(read_export(d) == {"server_principals": [
-        {"name": "a", "sid": "0a01", "type": "S"},
-        {"name": "b", "sid": "0b02", "type": "U"}]},
+        {"name": "a", "sid": "0a01", "type": "S",
+         "can_alter_any_login": True},
+        {"name": "b", "sid": "0b02", "type": "U",
+         "can_alter_any_login": True}]},
         "an export is read into rows and its SIDs are normalised")
     put(d, "other", ["x"], [["1"]])
     check(list(read_export(d)) == ["server_principals"],
@@ -1740,10 +1794,11 @@ def _self_test(tmp):
     demo = os.path.join(tmp, "demo")
 
     def write_demo(directory):
-        put(directory, "server_principals", ["name", "sid", "type", "pw"],
-            [["sa", "0x01", "S", "canary-hash-1"],
-             ["sde", "0xA001", "S", "canary-hash-2"],
-             ["edit_a", "0xA002", "S", "canary-hash-3"]])
+        put(directory, "server_principals",
+            ["name", "sid", "type", "can_alter_any_login", "pw"],
+            [["sa", "0x01", "S", "1", "canary-hash-1"],
+             ["sde", "0xA001", "S", "1", "canary-hash-2"],
+             ["edit_a", "0xA002", "S", "1", "canary-hash-3"]])
         put(directory, "database_principals",
             ["name", "sid", "authentication_type_desc"],
             [["dbo", "0x01", "INSTANCE"], ["sde", "0xA0FF", "INSTANCE"],
@@ -2110,6 +2165,131 @@ def _self_test(tmp):
           and "\nFAIL  " not in out,
           "a destination login list without the sa row skips every "
           "login-name rule  <-- pinned defect")
+
+    # A login or grant list from a login that could not see every row is
+    # skipped, never judged. The sa row cannot show it: every login sees sa.
+    login_rules = ["orphan-user", "version-owner", "job-owner", "login-missing"]
+    for label, hidden in (
+            ("a login list with can_alter_any_login at 0",
+             [dict(sp("sa", "01"), can_alter_any_login=False)]),
+            ("a login list with the column absent",
+             [{"name": "sa", "sid": "01", "type": "S"}]),
+            ("a login list with one row at 0 among rows at 1",
+             [sp("sa", "01"), sp("edit_a", "a002"),
+              dict(sp("CORP\\svc", "b001", "U"), can_alter_any_login=False)])):
+        report = partial(server_principals=hidden)
+        why = dict(report.skipped)
+        check([r for r in login_rules if r in why] == login_rules
+              and "without ALTER ANY LOGIN" in why["orphan-user"]
+              and report.fails == 0 and gate(report) == 5,
+              "%s skips the four login rules, never a FAIL or a clean exit  "
+              "<-- pinned defect" % label)
+    report = partial(server_principals=[dict(sp("sa", "01"),
+                                             can_alter_any_login=False)])
+    check("job-copy" in [r[0] for r in report.ran]
+          and "login-missing" in dict(report.skipped),
+          "a hidden login list leaves job-copy running, because it only "
+          "reads a login's name for a WARN")
+    report = partial(source_server_principals=[
+        sp("sa", "01"), dict(sp("edit_a", "a002"),
+                             can_alter_any_login=False)])
+    check(dict(report.skipped).get("login-missing", "").startswith(
+        "source_server_principals.csv was exported without ALTER ANY LOGIN")
+        and "orphan-user" in [r[0] for r in report.ran]
+        and report.fails == 0 and gate(report) == 5,
+        "a source login list from a login without ALTER ANY LOGIN skips "
+        "login-missing only  <-- pinned defect")
+    missing_grant = [pm("edit_a", "SELECT"), pm("edit_a", "UPDATE"),
+                     pm("edit_a", "SELECT", "sites_evw")]
+    report = partial(database_permissions=missing_grant)
+    check(names(report.findings) == [("evw-grant", FAIL, "dbo.sites_evw / "
+                                      "edit_a")],
+          "with can_view_definition at 1 a missing view grant still fails")
+    for label, rows in (
+            ("a grant list with can_view_definition at 0",
+             [dict(r, can_view_definition=False) for r in missing_grant]),
+            ("a grant list with one row at 0 among rows at 1",
+             missing_grant[:2] + [dict(missing_grant[2],
+                                       can_view_definition=False)]),
+            ("a grant list with the column absent",
+             [dict((k, v) for k, v in r.items() if k != "can_view_definition")
+              for r in missing_grant])):
+        report = partial(database_permissions=rows)
+        check(dict(report.skipped).get("evw-grant", "").endswith(
+            "grants and objects may be hidden") and report.fails == 0
+            and gate(report) == 5,
+            "%s skips evw-grant, because a hidden grant is not a missing "
+            "one  <-- pinned defect" % label)
+
+    hide = os.path.join(tmp, "hidden_logins")
+    put(hide, "server_principals",
+        ["name", "sid", "type", "can_alter_any_login"],
+        [["sa", "0x01", "S", "0"]])
+    put(hide, "database_principals",
+        ["name", "sid", "authentication_type_desc"],
+        [["dbo", "0x01", "NONE"], ["app_user", "0xA001", "INSTANCE"]])
+    code, out, err = run_cli([hide])
+    check(code == 4 and "\nFAIL  " not in out
+          and "server_principals.csv was exported without ALTER ANY LOGIN"
+          in out,
+          "a login list that holds only sa from a login without ALTER ANY "
+          "LOGIN fails no user: exit 4  <-- pinned defect")
+    put(hide, "server_principals",
+        ["name", "sid", "type", "can_alter_any_login"],
+        [["sa", "0x01", "S", "1"]])
+    code, out, err = run_cli([hide])
+    check(code == 1 and "FAIL  orphan-user  app_user" in out,
+          "the same list exported with ALTER ANY LOGIN still fails the "
+          "user whose login is absent")
+    put(hide, "server_principals",
+        ["name", "sid", "type", "can_alter_any_login"],
+        [["sa", "0x01", "S", "NULL"]])
+    code, out, err = run_cli([hide])
+    check(code == 4 and "without ALTER ANY LOGIN" in out,
+          "the text NULL in can_alter_any_login reads as no")
+    put(hide, "server_principals",
+        ["name", "sid", "type", "can_alter_any_login"],
+        [["sa", "0x01", "S", "maybe"]])
+    code, out, err = run_cli([hide])
+    check(code == 3 and "column can_alter_any_login" in out,
+          "a can_alter_any_login cell that is not 0 or 1 is refused")
+
+    perms = os.path.join(tmp, "partial_perms")
+    put(perms, "server_principals", ["name", "sid", "type"],
+        [["sa", "0x01", "S"], ["app_user", "0xA001", "S"]])
+    put(perms, "database_principals",
+        ["name", "sid", "authentication_type_desc"],
+        [["dbo", "0x01", "NONE"], ["app_user", "0xA001", "INSTANCE"]])
+    put(perms, "objects", ["schema_name", "object_name", "type"],
+        [["dbo", "sites", "U"], ["dbo", "sites_evw", "V"],
+         ["dbo", "parcels", "U"], ["dbo", "parcels_evw", "V"]])
+    grant_header = ["class_desc", "schema_name", "object_name", "column_name",
+                    "grantee", "permission_name", "state_desc",
+                    "can_view_definition"]
+    shown = [["OBJECT_OR_COLUMN", "dbo", "sites", "", "app_user", "UPDATE",
+              "GRANT", "0"]]
+    put(perms, "database_permissions", grant_header, shown)
+    code, out, err = run_cli([perms])
+    check(code == 5 and "\nFAIL  " not in out
+          and "VERDICT: no FAIL" in out and "without VIEW DEFINITION" in out,
+          "a grant list from a login without VIEW DEFINITION skips "
+          "evw-grant, and the run exits 5, not 0  <-- pinned defect")
+    code, out, err = run_cli([perms, "--allow-skipped"])
+    check(code == 0 and "evw-grant        database_permissions.csv was exported"
+          in out,
+          "--allow-skipped is the only way to a 0, and the skipped rule is "
+          "still listed")
+    shown[0][-1] = "1"
+    put(perms, "database_permissions", grant_header, shown)
+    code, out, err = run_cli([perms])
+    check(code == 1 and "FAIL  evw-grant  dbo.sites_evw / app_user" in out,
+          "the same grant list exported with VIEW DEFINITION fails the "
+          "missing view grant")
+    shown[0][-1] = "NULL"
+    put(perms, "database_permissions", grant_header, shown)
+    code, out, err = run_cli([perms])
+    check(code == 5 and "without VIEW DEFINITION" in out,
+          "the text NULL in can_view_definition reads as no")
 
     # End to end: partial catalogs and the optional ALTER ANY USER column.
     part = os.path.join(tmp, "partial_catalog")
